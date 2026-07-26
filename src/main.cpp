@@ -140,6 +140,89 @@ void triggerEasterEgg1() {
   }
 }
 
+#define image_83f04b_width 40
+#define image_83f04b_height 40
+
+static const unsigned char image_83f04b_bits[] U8X8_PROGMEM = {
+0x00, 0x00, 0x00, 0x00, 0x00, 
+0x00, 0xF8, 0x80, 0x07, 0x00, 
+0x00, 0xE2, 0xE7, 0x27, 0x00, 
+0x80, 0x07, 0x00, 0xF8, 0x00, 
+0x80, 0x83, 0xFF, 0x60, 0x00, 
+0x00, 0xF0, 0xFF, 0x07, 0x00, 
+0x78, 0xF8, 0xFF, 0x07, 0x0F, 
+0x7C, 0xFC, 0xFC, 0x9F, 0x1F, 
+0x7E, 0xFE, 0xFC, 0x9F, 0x3F, 
+0x07, 0xFE, 0xFC, 0x1F, 0x70, 
+0x7F, 0xFE, 0x1C, 0x1F, 0x7F, 
+0x7F, 0xFE, 0xFC, 0x9F, 0x7F, 
+0x7C, 0xDE, 0xFF, 0x9D, 0x1F, 
+0xF8, 0x3C, 0x00, 0x9E, 0x07, 
+0x00, 0x78, 0xF5, 0x0F, 0x00, 
+0x00, 0x70, 0xF7, 0x27, 0x00, 
+0x80, 0xE1, 0xF8, 0xE3, 0x00, 
+0xC0, 0x81, 0xFF, 0xE0, 0x01, 
+0xE0, 0x07, 0x00, 0xD8, 0x03, 
+0x60, 0x3E, 0x00, 0xBE, 0x03, 
+0x60, 0xFE, 0xF7, 0xBF, 0x03, 
+0xE0, 0xFF, 0x80, 0xFF, 0x03, 
+0x80, 0x0F, 0x00, 0xF8, 0x00, 
+0x00, 0x00, 0x06, 0x00, 0x00, 
+0x00, 0x00, 0x0F, 0x00, 0x00, 
+0x00, 0x00, 0x0F, 0x00, 0x00, 
+0x00, 0x80, 0x07, 0x00, 0x00, 
+0x00, 0x80, 0x03, 0x00, 0x00, 
+0x00, 0x80, 0x03, 0x00, 0x00, 
+0x00, 0x00, 0x07, 0x00, 0x00, 
+0x00, 0x00, 0x0F, 0x00, 0x00, 
+0x00, 0x00, 0x1E, 0x00, 0x00, 
+0x00, 0x00, 0x1C, 0x00, 0x00, 
+0x00, 0x00, 0x38, 0x00, 0x00, 
+0x00, 0x00, 0x7C, 0x00, 0x00, 
+0x00, 0x20, 0x7E, 0x02, 0x00, 
+0x00, 0x20, 0x7F, 0x02, 0x00, 
+0x00, 0x40, 0x3E, 0x01, 0x00, 
+0x00, 0x80, 0x80, 0x00, 0x00, 
+0x00, 0x00, 0x7F, 0x00, 0x00, 
+};
+
+void triggerEasterEgg2() {
+  Serial.println(F("[EasterEgg] Running Easter Egg 2: yara + flowey"));
+  
+  if (display_enabled) {
+    // Usamos el bucle de página oficial para el constructor de página _2_
+    display.firstPage();
+    do {
+      // 1. Dibujar texto "yara" centrado arriba
+      display.setFont(u8g2_font_inb21_mf);
+      int text_x = (128 - display.getStrWidth("yara")) / 2;
+      int text_y = 21;
+      display.drawStr(text_x, text_y, "yara");
+
+      // 2. Dibujar la flor Flowey (40x40 px) centrada abajo
+      int flower_x = (128 - image_83f04b_width) / 2;
+      int flower_y = 32;
+      display.drawXBMP(flower_x, flower_y, image_83f04b_width, image_83f04b_height, image_83f04b_bits);
+    } while (display.nextPage());
+    
+    // Hacer sonar el buzzer con la melodía festiva (manteniendo el comportamiento de audio)
+#if defined(ESP32)
+    esp32_tone(PIN_BUZZER, 523, 200, TONE_CHANNEL); // C5
+    delay(200);
+    esp32_tone(PIN_BUZZER, 659, 200, TONE_CHANNEL); // E5
+    delay(200);
+    esp32_tone(PIN_BUZZER, 784, 200, TONE_CHANNEL); // G5
+    delay(200);
+    esp32_tone(PIN_BUZZER, 1047, 400, TONE_CHANNEL); // C6
+    delay(400);
+    esp32_noTone(PIN_BUZZER, TONE_CHANNEL);
+#endif
+    
+    // Mantener expuesto en pantalla por 5 segundos en total (1s de audio + 4s adicionales)
+    delay(4000);
+  }
+}
+
 void displayTama();
 static timestamp_t hal_get_timestamp(void);
 
@@ -235,8 +318,8 @@ static void hal_play_frequency(bool_t en)
 #endif
 }
 
-// Debounce de 300ms real para eliminar saltos de números
-#define BTN_DEBOUNCE_MS 300
+// Debounce de 50ms real para eliminar saltos de números y permitir clics consecutivos rápidos
+#define BTN_DEBOUNCE_MS 50
 
 // Sequence player: reproduce secuencias de botones virtuales hacia la ROM
 static int seq_state = 0;       // 0 = idle
@@ -401,26 +484,37 @@ static int hal_handler(void)
   bool pressed_m = btn_m && !prev_m;
   bool pressed_r = btn_r && !prev_r;
 
-  // Máquina de estados para secuencia: GPIO27 -> GPIO25 -> GPIO27 -> GPIO26 (< 3s)
+  // Máquina de estados para secuencia de Easter Egg 1: GPIO27 -> GPIO25 -> GPIO27 -> GPIO26 (< 3s)
   static int seq_step = 0;
   static unsigned long seq_start_time = 0;
 
+  // Máquina de estados para secuencia de Easter Egg 2: GPIO27 -> GPIO27 -> GPIO25 -> GPIO25 -> GPIO26 -> GPIO26 (< 5s)
+  static int seq2_step = 0;
+  static unsigned long seq2_start_time = 0;
+
   if (pressed_l || pressed_m || pressed_r) {
     unsigned long current_time = millis();
+    
+    // Reset de tiempo para secuencia 1
     if (seq_step > 0 && (current_time - seq_start_time > 3000)) {
       seq_step = 0;
     }
+    // Reset de tiempo para secuencia 2
+    if (seq2_step > 0 && (current_time - seq2_start_time > 5000)) {
+      seq2_step = 0;
+    }
 
+    // --- Máquina para Secuencia 1 ---
     if (seq_step == 0) {
       if (pressed_r) { // GPIO 27
         seq_step = 1;
         seq_start_time = current_time;
-        Serial.println(F("[EasterEgg] Seq step 1: GPIO27 pressed"));
+        Serial.println(F("[EasterEgg1] Seq step 1: GPIO27 pressed"));
       }
     } else if (seq_step == 1) {
       if (pressed_l) { // GPIO 25
         seq_step = 2;
-        Serial.println(F("[EasterEgg] Seq step 2: GPIO25 pressed"));
+        Serial.println(F("[EasterEgg1] Seq step 2: GPIO25 pressed"));
       } else {
         seq_step = pressed_r ? 1 : 0;
         if (seq_step == 1) seq_start_time = current_time;
@@ -428,16 +522,16 @@ static int hal_handler(void)
     } else if (seq_step == 2) {
       if (pressed_r) { // GPIO 27
         seq_step = 3;
-        Serial.println(F("[EasterEgg] Seq step 3: GPIO27 pressed"));
+        Serial.println(F("[EasterEgg1] Seq step 3: GPIO27 pressed"));
       } else {
         seq_step = 0;
       }
     } else if (seq_step == 3) {
       if (pressed_m) { // GPIO 26
         seq_step = 0;
-        Serial.println(F("[EasterEgg] Seq complete! Activating Easter Egg 1"));
+        Serial.println(F("[EasterEgg1] Seq complete! Activating Easter Egg 1"));
         triggerEasterEgg1();
-        // Limpiamos los flancos detectados y debounces para que no interfieran en el juego tras volver
+        // Limpiamos los flancos detectados y debounces
         debounced_l = raw_l = false;
         debounced_m = raw_m = false;
         debounced_r = raw_r = false;
@@ -446,6 +540,63 @@ static int hal_handler(void)
       } else {
         seq_step = pressed_r ? 1 : 0;
         if (seq_step == 1) seq_start_time = current_time;
+      }
+    }
+
+    // --- Máquina para Secuencia 2 ---
+    if (seq2_step == 0) {
+      if (pressed_r) { // GPIO 27
+        seq2_step = 1;
+        seq2_start_time = current_time;
+        Serial.println(F("[EasterEgg2] Seq step 1: GPIO27 pressed"));
+      }
+    } else if (seq2_step == 1) {
+      if (pressed_r) { // GPIO 27
+        seq2_step = 2;
+        Serial.println(F("[EasterEgg2] Seq step 2: GPIO27 pressed"));
+      } else if (pressed_l || pressed_m) {
+        seq2_step = 0;
+      }
+    } else if (seq2_step == 2) {
+      if (pressed_l) { // GPIO 25
+        seq2_step = 3;
+        Serial.println(F("[EasterEgg2] Seq step 3: GPIO25 pressed"));
+      } else if (pressed_r) {
+        seq2_step = 2;
+        seq2_start_time = current_time;
+      } else {
+        seq2_step = 0;
+      }
+    } else if (seq2_step == 3) {
+      if (pressed_l) { // GPIO 25
+        seq2_step = 4;
+        Serial.println(F("[EasterEgg2] Seq step 4: GPIO25 pressed"));
+      } else {
+        seq2_step = pressed_r ? 1 : 0;
+        if (seq2_step == 1) seq2_start_time = current_time;
+      }
+    } else if (seq2_step == 4) {
+      if (pressed_m) { // GPIO 26
+        seq2_step = 5;
+        Serial.println(F("[EasterEgg2] Seq step 5: GPIO26 pressed"));
+      } else {
+        seq2_step = pressed_r ? 1 : 0;
+        if (seq2_step == 1) seq2_start_time = current_time;
+      }
+    } else if (seq2_step == 5) {
+      if (pressed_m) { // GPIO 26
+        seq2_step = 0;
+        Serial.println(F("[EasterEgg2] Seq complete! Activating Easter Egg 2"));
+        triggerEasterEgg2();
+        // Limpiamos los flancos detectados y debounces
+        debounced_l = raw_l = false;
+        debounced_m = raw_m = false;
+        debounced_r = raw_r = false;
+        btn_l = btn_m = btn_r = false;
+        pressed_l = pressed_m = pressed_r = false;
+      } else {
+        seq2_step = pressed_r ? 1 : 0;
+        if (seq2_step == 1) seq2_start_time = current_time;
       }
     }
   }
