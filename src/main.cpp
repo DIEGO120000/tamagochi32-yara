@@ -223,6 +223,60 @@ void triggerEasterEgg2() {
   }
 }
 
+#define BITMAP3_WIDTH 40
+#define BITMAP3_HEIGHT 40
+
+static const unsigned char bitmap3_data[] U8X8_PROGMEM = {
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x81, 0x00, 0x00, 0x00, 0x01, 0xC3, 0x80, 0x00, 0x00, 0x01, 0xC3,
+    0x80, 0x00, 0x00, 0x01, 0xF3, 0xF0, 0x00, 0x00, 0x01, 0xF3, 0xF0, 0x00,
+    0x00, 0x01, 0xFF, 0xF0, 0x00, 0x00, 0x01, 0xFF, 0xF0, 0x00, 0x00, 0x01,
+    0xFF, 0xF0, 0x00, 0x00, 0x01, 0xCE, 0x70, 0x00, 0x00, 0x01, 0xC4, 0x70,
+    0x00, 0x00, 0x01, 0xFF, 0xF0, 0x00, 0x00, 0x01, 0xFF, 0xF0, 0x00, 0x00,
+    0x01, 0xFF, 0xF0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x01, 0xFF, 0x80, 0x00, 0x00, 0x01, 0xFF, 0x80, 0x00,
+    0x00, 0x01, 0xFF, 0x80, 0x00, 0x00, 0x01, 0xFF, 0x80, 0x00, 0x00, 0x01,
+    0xFF, 0x80, 0x00, 0x00, 0x07, 0xFF, 0x80, 0x00, 0x00, 0x0F, 0xFF, 0x80,
+    0x00, 0x00, 0x0F, 0xFF, 0x80, 0x00, 0x00, 0x0F, 0xFF, 0x80, 0x00, 0x00,
+    0x0F, 0xFF, 0x80, 0x00, 0x07, 0x8F, 0xFF, 0x80, 0x00, 0x07, 0xCF, 0xFF,
+    0x80, 0x00, 0x07, 0xCF, 0xFF, 0x80, 0x00, 0x07, 0x0F, 0xFF, 0x80, 0x00,
+    0x06, 0x0F, 0xFF, 0x80, 0x00, 0x07, 0x6F, 0xFF, 0x80, 0x00, 0x07, 0xFF,
+    0xFF, 0x80, 0x00, 0x07, 0xFF, 0xFF, 0x80, 0x00
+};
+
+void triggerEasterEgg3() {
+  Serial.println(F("[EasterEgg] Running Easter Egg 3: Save me"));
+  
+  if (display_enabled) {
+    display.firstPage();
+    do {
+      display.setFont(u8g2_font_5x7_tf);
+      display.drawStr(0, 7, "Save me, because I");
+      display.drawStr(0, 15, "might not be there,");
+      display.drawStr(0, 23, "but I am here.");
+      display.drawBitmap(44, 24, 5, 40, bitmap3_data);
+    } while (display.nextPage());
+    
+    // Hacer sonar el buzzer con la melodía festiva (manteniendo el comportamiento de audio)
+#if defined(ESP32)
+    esp32_tone(PIN_BUZZER, 523, 200, TONE_CHANNEL); // C5
+    delay(200);
+    esp32_tone(PIN_BUZZER, 659, 200, TONE_CHANNEL); // E5
+    delay(200);
+    esp32_tone(PIN_BUZZER, 784, 200, TONE_CHANNEL); // G5
+    delay(200);
+    esp32_tone(PIN_BUZZER, 1047, 400, TONE_CHANNEL); // C6
+    delay(400);
+    esp32_noTone(PIN_BUZZER, TONE_CHANNEL);
+#endif
+    
+    // Mantener expuesto en pantalla por 5 segundos en total
+    delay(4000);
+  }
+}
+
 void displayTama();
 static timestamp_t hal_get_timestamp(void);
 
@@ -492,6 +546,10 @@ static int hal_handler(void)
   static int seq2_step = 0;
   static unsigned long seq2_start_time = 0;
 
+  // Máquina de estados para secuencia de Easter Egg 3: GPIO26 -> GPIO26 -> GPIO25 -> GPIO25 -> GPIO27 -> GPIO27 -> GPIO26 (< 5s)
+  static int seq3_step = 0;
+  static unsigned long seq3_start_time = 0;
+
   if (pressed_l || pressed_m || pressed_r) {
     unsigned long current_time = millis();
     
@@ -502,6 +560,10 @@ static int hal_handler(void)
     // Reset de tiempo para secuencia 2
     if (seq2_step > 0 && (current_time - seq2_start_time > 5000)) {
       seq2_step = 0;
+    }
+    // Reset de tiempo para secuencia 3
+    if (seq3_step > 0 && (current_time - seq3_start_time > 5000)) {
+      seq3_step = 0;
     }
 
     // --- Máquina para Secuencia 1 ---
@@ -597,6 +659,71 @@ static int hal_handler(void)
       } else {
         seq2_step = pressed_r ? 1 : 0;
         if (seq2_step == 1) seq2_start_time = current_time;
+      }
+    }
+
+    // --- Máquina para Secuencia 3 ---
+    if (seq3_step == 0) {
+      if (pressed_m) { // GPIO 26
+        seq3_step = 1;
+        seq3_start_time = current_time;
+        Serial.println(F("[EasterEgg3] Seq step 1: GPIO26 pressed"));
+      }
+    } else if (seq3_step == 1) {
+      if (pressed_m) { // GPIO 26
+        seq3_step = 2;
+        Serial.println(F("[EasterEgg3] Seq step 2: GPIO26 pressed"));
+      } else if (pressed_l || pressed_r) {
+        seq3_step = 0;
+      }
+    } else if (seq3_step == 2) {
+      if (pressed_l) { // GPIO 25
+        seq3_step = 3;
+        Serial.println(F("[EasterEgg3] Seq step 3: GPIO25 pressed"));
+      } else if (pressed_m) {
+        seq3_step = 2;
+        seq3_start_time = current_time;
+      } else {
+        seq3_step = 0;
+      }
+    } else if (seq3_step == 3) {
+      if (pressed_l) { // GPIO 25
+        seq3_step = 4;
+        Serial.println(F("[EasterEgg3] Seq step 4: GPIO25 pressed"));
+      } else {
+        seq3_step = pressed_m ? 1 : 0;
+        if (seq3_step == 1) seq3_start_time = current_time;
+      }
+    } else if (seq3_step == 4) {
+      if (pressed_r) { // GPIO 27
+        seq3_step = 5;
+        Serial.println(F("[EasterEgg3] Seq step 5: GPIO27 pressed"));
+      } else {
+        seq3_step = pressed_m ? 1 : 0;
+        if (seq3_step == 1) seq3_start_time = current_time;
+      }
+    } else if (seq3_step == 5) {
+      if (pressed_r) { // GPIO 27
+        seq3_step = 6;
+        Serial.println(F("[EasterEgg3] Seq step 6: GPIO27 pressed"));
+      } else {
+        seq3_step = pressed_m ? 1 : 0;
+        if (seq3_step == 1) seq3_start_time = current_time;
+      }
+    } else if (seq3_step == 6) {
+      if (pressed_m) { // GPIO 26
+        seq3_step = 0;
+        Serial.println(F("[EasterEgg3] Seq complete! Activating Easter Egg 3"));
+        triggerEasterEgg3();
+        // Limpiamos los flancos detectados y debounces
+        debounced_l = raw_l = false;
+        debounced_m = raw_m = false;
+        debounced_r = raw_r = false;
+        btn_l = btn_m = btn_r = false;
+        pressed_l = pressed_m = pressed_r = false;
+      } else {
+        seq3_step = pressed_m ? 1 : 0;
+        if (seq3_step == 1) seq3_start_time = current_time;
       }
     }
   }
