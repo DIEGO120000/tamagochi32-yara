@@ -52,6 +52,15 @@ U8G2_SSD1306_128X64_NONAME_2_HW_I2C display(U8G2_MIRROR);
 
 static bool display_enabled = false;
 
+// Variables y prototipos para la máquina de estados de inactividad (Modo Sleep)
+#define SLEEP_TIMEOUT_MS 60000 // 60 segundos de inactividad para suspender la pantalla
+static bool screen_sleeping = false;
+static unsigned long last_activity_time = 0;
+
+void wake_up_screen();
+void go_to_sleep();
+
+
 enum EstadoTamagotchi {
   CONFIGURACION,
   JUEGO
@@ -138,6 +147,7 @@ void triggerEasterEgg1() {
     // Mantener expuesto en pantalla por 5 segundos en total (1s de audio + 4s adicionales)
     delay(4000);
   }
+  last_activity_time = millis();
 }
 
 #define image_83f04b_width 40
@@ -221,6 +231,7 @@ void triggerEasterEgg2() {
     // Mantener expuesto en pantalla por 5 segundos en total (1s de audio + 4s adicionales)
     delay(4000);
   }
+  last_activity_time = millis();
 }
 
 #define BITMAP3_WIDTH 40
@@ -275,9 +286,32 @@ void triggerEasterEgg3() {
     // Mantener expuesto en pantalla por 5 segundos en total
     delay(4000);
   }
+  last_activity_time = millis();
 }
 
 void displayTama();
+
+void wake_up_screen() {
+  if (screen_sleeping) {
+    screen_sleeping = false;
+    if (display_enabled) {
+      display.setPowerSave(0); // Encender pantalla (despertar panel OLED)
+      displayTama();           // Redibujar inmediatamente
+    }
+    Serial.println(F("[SleepMode] Pantalla encendida (Wake-up)"));
+  }
+  last_activity_time = millis();
+}
+
+void go_to_sleep() {
+  if (!screen_sleeping) {
+    screen_sleeping = true;
+    if (display_enabled) {
+      display.setPowerSave(1); // Apagar pantalla (bajo consumo)
+    }
+    Serial.println(F("[SleepMode] Pantalla apagada por inactividad (Sleep)"));
+  }
+}
 static timestamp_t hal_get_timestamp(void);
 
 
@@ -351,6 +385,7 @@ static void hal_play_frequency(bool_t en)
 #ifdef ENABLE_TAMA_SOUND
   if (en)
   {
+    wake_up_screen();
 
 #if defined(ESP32)
     esp32_tone(PIN_BUZZER, current_freq, 500, BUZZER_CHANNEL);
@@ -514,6 +549,15 @@ static int hal_handler(void)
   bool raw_l = (digitalRead(PIN_BTN_L) == BUTTON_VOLTAGE_LEVEL_PRESSED); // GPIO 25
   bool raw_m = (digitalRead(PIN_BTN_M) == BUTTON_VOLTAGE_LEVEL_PRESSED); // GPIO 26
   bool raw_r = (digitalRead(PIN_BTN_R) == BUTTON_VOLTAGE_LEVEL_PRESSED); // GPIO 27
+
+  // Registrar actividad por pulsación física
+  if (raw_l || raw_m || raw_r) {
+    if (screen_sleeping) {
+      wake_up_screen();
+    } else {
+      last_activity_time = millis();
+    }
+  }
 
   // Debounce: cambiar estado solo si han pasado 300ms desde el último cambio
   if (raw_l != debounced_l && (now - last_time_l >= BTN_DEBOUNCE_MS)) {
@@ -941,6 +985,7 @@ void drawTamaSelection(uint8_t y)
 void displayTama()
 {
   if (!display_enabled) return;
+  if (screen_sleeping) return;
   display.clearBuffer(); // Limpieza de búfer forzada para evitar basura en pantalla (cuadros blancos)
   uint8_t j;
   display.firstPage();
@@ -1056,6 +1101,7 @@ uint8_t reverseBits(uint8_t num)
 void setup()
 {
   Serial.begin(SERIAL_BAUD);
+  last_activity_time = millis();
 
   pinMode(PIN_BTN_L, INPUT_PULLUP);
   pinMode(PIN_BTN_M, INPUT_PULLUP);
@@ -1116,6 +1162,11 @@ void setup()
 void loop()
 {
   static unsigned long last_cpu_step = 0;
+
+  // Control de inactividad para suspender la pantalla
+  if (!screen_sleeping && (millis() - last_activity_time >= SLEEP_TIMEOUT_MS)) {
+    go_to_sleep();
+  }
   static unsigned long last_real_second = 0;
   unsigned long now = micros();
 
