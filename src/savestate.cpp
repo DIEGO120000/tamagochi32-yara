@@ -7,9 +7,28 @@
 
 // Calculate Fletcher16 checksum over the cpu_state_t and the memory array
 uint16_t calculateStateChecksum(const cpu_state_t* state, const u4_t* memory_data, uint16_t memory_len) {
-    // Copy to temporary state to zero out volatile pointer before checksumming
-    cpu_state_t tempState = *state;
-    tempState.memory = nullptr;
+    // Zero-initialize to ensure all padding bytes are strictly 0
+    cpu_state_t tempState;
+    memset(&tempState, 0, sizeof(cpu_state_t));
+
+    // Copy all fields manually to prevent uninitialized padding garbage
+    tempState.pc = state->pc;
+    tempState.x = state->x;
+    tempState.y = state->y;
+    tempState.a = state->a;
+    tempState.b = state->b;
+    tempState.np = state->np;
+    tempState.sp = state->sp;
+    tempState.flags = state->flags;
+    tempState.tick_counter = state->tick_counter;
+    tempState.clk_timer_timestamp = state->clk_timer_timestamp;
+    tempState.prog_timer_timestamp = state->prog_timer_timestamp;
+    tempState.prog_timer_enabled = state->prog_timer_enabled;
+    tempState.prog_timer_data = state->prog_timer_data;
+    tempState.prog_timer_rld = state->prog_timer_rld;
+    tempState.call_depth = state->call_depth;
+    tempState.memory = nullptr; // Zero volatile pointer
+    memcpy(tempState.interrupts, state->interrupts, sizeof(tempState.interrupts));
 
     uint16_t sum1 = 0;
     uint16_t sum2 = 0;
@@ -85,33 +104,40 @@ bool isStateValid(const cpu_state_t* state) {
     }
 
     // Check minutes tens/ones BCD digits
-    if (state->memory[32] > 9) {
-        Serial.println(F("[integrity] Clock minutes ones digit corrupt (> 9)"));
+    uint8_t min_ones = get_ram_nibble(state->memory, 64);
+    uint8_t min_tens = get_ram_nibble(state->memory, 66);
+    if (min_ones > 9) {
+        Serial.print(F("[integrity] Clock minutes ones digit corrupt (> 9): "));
+        Serial.println(min_ones);
         return false;
     }
-    if (state->memory[33] > 5) {
-        Serial.println(F("[integrity] Clock minutes tens digit corrupt (> 5)"));
+    if (min_tens > 5) {
+        Serial.print(F("[integrity] Clock minutes tens digit corrupt (> 5): "));
+        Serial.println(min_tens);
         return false;
     }
 
     // Check hours tens/ones BCD digits and overall range (0 to 12)
-    int hours = state->memory[37] * 10 + state->memory[36];
+    uint8_t hour_ones = get_ram_nibble(state->memory, 72);
+    uint8_t hour_tens = get_ram_nibble(state->memory, 74);
+    int hours = hour_tens * 10 + hour_ones;
     if (hours > 12) {
         Serial.print(F("[integrity] Clock hours out of valid 0-12 range: "));
         Serial.println(hours);
         return false;
     }
-    if (state->memory[36] > 9) {
+    if (hour_ones > 9) {
         Serial.println(F("[integrity] Clock hours ones digit corrupt (> 9)"));
         return false;
     }
-    if (state->memory[37] > 1) {
+    if (hour_tens > 1) {
         Serial.println(F("[integrity] Clock hours tens digit corrupt (> 1)"));
         return false;
     }
 
     // Check PM flag
-    if (state->memory[38] > 1) {
+    uint8_t pm_flag = get_ram_nibble(state->memory, 76);
+    if (pm_flag > 1) {
         Serial.println(F("[integrity] Clock PM flag corrupt (> 1)"));
         return false;
     }
@@ -124,7 +150,7 @@ bool isStateValid(const cpu_state_t* state) {
 void initEEPROM()
 {
 #if defined(ESP8266) || defined(ESP32)
-    EEPROM.begin(EEPROM_MAX_SIZE);
+    EEPROM.begin(EEPROM_MAX_SIZE + 30);
 #endif
 }
 

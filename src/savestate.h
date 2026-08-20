@@ -30,4 +30,20 @@ void saveStateToEEPROM(cpu_state_t* cpuState);
 
 void loadHardcodedState(cpu_state_t* cpuState);
 
+inline uint8_t get_ram_nibble(const uint8_t* memory, uint16_t n) {
+    if ((n & 1) == 0) {
+        return (memory[n >> 1] >> 4) & 0x0F;
+    } else {
+        return memory[n >> 1] & 0x0F;
+    }
+}
+
+inline void set_ram_nibble(uint8_t* memory, uint16_t n, uint8_t val) {
+    if ((n & 1) == 0) {
+        memory[n >> 1] = (memory[n >> 1] & 0x0F) | ((val & 0x0F) << 4);
+    } else {
+        memory[n >> 1] = (memory[n >> 1] & 0xF0) | (val & 0x0F);
+    }
+}
+
 #endif /* _SAVESTATE_H_ */

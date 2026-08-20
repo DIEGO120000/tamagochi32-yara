@@ -25,12 +25,58 @@
 #include "tamalib.h"
 #include "hw.h"
 #include "bitmaps.h"
-#if defined(ENABLE_AUTO_SAVE_STATUS) || defined(ENABLE_LOAD_STATE_FROM_EEPROM)
 #include "savestate.h"
 #include <EEPROM.h>
-#endif
 
 #include "config_fix.h"
+#ifndef PROGMEM
+#define PROGMEM
+#endif
+#include "hpbd.h"
+
+// ==========================================================================
+//  Temporizador Pomodoro Settings & State
+// ==========================================================================
+enum PomodoroScreenState {
+  POMO_MAIN,
+  POMO_CONF_WORK,
+  POMO_CONF_SHORT,
+  POMO_CONF_LONG
+};
+
+static bool pomodoro_screen_active = false;
+static PomodoroScreenState pomo_screen_state = POMO_MAIN;
+
+static bool pomo_configured = false;
+static bool pomo_active = false; // Timer running or paused
+static uint8_t pomo_phase = 0;   // 0-7: Work1, ShortBreak1, Work2, ShortBreak2, Work3, ShortBreak3, Work4, LongBreak
+static uint32_t pomo_seconds_left = 0;
+
+static uint8_t pomo_work_time = 25;       // minutes
+static uint8_t pomo_short_break = 5;      // minutes
+static uint8_t pomo_long_break = 15;      // minutes
+
+static uint8_t pomo_temp_work = 25;
+static uint8_t pomo_temp_short = 5;
+static uint8_t pomo_temp_long = 15;
+
+static bool pomo_alert_active = false;
+static char pomo_alert_msg1[40] = "";
+static char pomo_alert_msg2[40] = "";
+
+static unsigned long last_beep_time = 0;
+static uint8_t beep_substep = 0;
+
+#define EEPROM_MAX_SIZE (sizeof(SaveHeader) + sizeof(cpu_state_t) + 0x140) // 0x140 is MEMORY_SIZE
+
+void savePomodoroConfig(uint8_t work, uint8_t s_break, uint8_t l_break);
+bool loadPomodoroConfig(uint8_t &work, uint8_t &s_break, uint8_t &l_break);
+void savePomodoroState();
+void loadPomodoroState();
+uint32_t get_pomo_phase_duration_seconds(uint8_t phase);
+const char* get_pomo_phase_name(uint8_t phase);
+void run_pomo_alarm();
+void update_pomodoro_timer();
 
 /***** Set display orientation, U8G2_MIRROR_VERTICAL is not supported *****/
 #define U8G2_LAYOUT_NORMAL
@@ -76,7 +122,7 @@ static EstadoTamagotchi estadoActual = CONFIGURACION;
 #define PIN_BTN_RST 5  // K4 (Reset)
 #define PIN_BUZZER 15
 #define BUZZER_CHANNEL 0
-#define TONE_CHANNEL 15
+#define TONE_CHANNEL 0
 #elif defined(ESP8266)
 #define PIN_BTN_L 12
 #define PIN_BTN_M 13
@@ -100,8 +146,9 @@ void esp32_noTone(uint8_t pin, uint8_t channel)
 
 void esp32_tone(uint8_t pin, unsigned int frequency, unsigned long duration, uint8_t channel)
 {
+  ledcSetup(channel, frequency, 10);
   ledcAttachPin(pin, channel);
-  ledcWriteTone(channel, frequency);
+  ledcWrite(channel, 512); // 50% duty cycle (maximum amplitude square wave)
 }
 #endif
 
@@ -289,7 +336,329 @@ void triggerEasterEgg3() {
   last_activity_time = millis();
 }
 
+// ================== CẤU HÌNH CÁC NỐT NHẠC (Easter Egg 4) ==================
+#define EGG4_NOTE_C4  262
+#define EGG4_NOTE_D4  294
+#define EGG4_NOTE_E4  330
+#define EGG4_NOTE_F4  349
+#define EGG4_NOTE_G4  392
+#define EGG4_NOTE_A4  440
+#define EGG4_NOTE_AS4 466
+
+#define EGG4_NOTE_C5  523
+#define EGG4_NOTE_D5  587
+#define EGG4_NOTE_E5  659
+#define EGG4_NOTE_F5  698
+#define EGG4_NOTE_G5  784
+#define EGG4_NOTE_A5  880
+#define EGG4_NOTE_C6  1047
+
+static const int melody_egg4[] PROGMEM = {
+  // Câu 1: Hap-py Birth-day to You
+  EGG4_NOTE_C4, 8, EGG4_NOTE_C4, 8, EGG4_NOTE_D4, 4, EGG4_NOTE_C4, 4, EGG4_NOTE_F4, 4, EGG4_NOTE_E4, 2,
+
+  // Câu 2: Hap-py Birth-day to You
+  EGG4_NOTE_C4, 8, EGG4_NOTE_C4, 8, EGG4_NOTE_D4, 4, EGG4_NOTE_C4, 4, EGG4_NOTE_G4, 4, EGG4_NOTE_F4, 2,
+
+  // Câu 3: Hap-py Birth-day Dear Friend
+  EGG4_NOTE_C4, 8, EGG4_NOTE_C4, 8, EGG4_NOTE_C5, 4, EGG4_NOTE_A4, 4, EGG4_NOTE_F4, 4, EGG4_NOTE_E4, 4, EGG4_NOTE_D4, 2,
+
+  // Câu 4: Hap-py Birth-day to You
+  EGG4_NOTE_AS4, 8, EGG4_NOTE_AS4, 8, EGG4_NOTE_A4, 4, EGG4_NOTE_F4, 4, EGG4_NOTE_G4, 4, EGG4_NOTE_F4, 2
+};
+
+static const uint8_t* const frames_egg4[] PROGMEM = {
+  frame0, frame1, frame2, frame3, frame4, frame5, frame6, frame7, frame8, frame9,
+  frame10, frame11, frame12, frame13, frame14, frame15, frame16, frame17, frame18, frame19,
+  frame20, frame21, frame22, frame23, frame24, frame25, frame26, frame27, frame28, frame29,
+  frame30, frame31, frame32, frame33, frame34, frame35, frame36, frame37, frame38, frame39,
+  frame40, frame41, frame42, frame43, frame44, frame45, frame46, frame47, frame48, frame49,
+  frame50, frame51, frame52, frame53, frame54, frame55, frame56, frame57, frame58, frame59,
+  frame60, frame61, frame62, frame63, frame64, frame65, frame66, frame67, frame68, frame69,
+  frame70, frame71, frame72, frame73, frame74, frame75, frame76, frame77, frame78, frame79,
+  frame80, frame81, frame82, frame83, frame84, frame85, frame86, frame87, frame88, frame89,
+  frame90, frame91, frame92, frame93, frame94, frame95, frame96, frame97, frame98, frame99,
+  frame100, frame101, frame102, frame103, frame104, frame105, frame106, frame107, frame108, frame109,
+  frame110, frame111, frame112, frame113, frame114, frame115, frame116, frame117, frame118, frame119,
+  frame120, frame121
+};
+
+void triggerEasterEgg4() {
+  Serial.println(F("[EasterEgg] Running Easter Egg 4: Happy Birthday Animation"));
+  
+  if (display_enabled) {
+    // Play start sound
+#if defined(ESP32)
+    esp32_tone(PIN_BUZZER, EGG4_NOTE_E5, 100, TONE_CHANNEL);
+    delay(120);
+    esp32_tone(PIN_BUZZER, EGG4_NOTE_G5, 100, TONE_CHANNEL);
+    delay(120);
+    esp32_tone(PIN_BUZZER, EGG4_NOTE_C6, 250, TONE_CHANNEL);
+    delay(300);
+    esp32_noTone(PIN_BUZZER, TONE_CHANNEL);
+    delay(100);
+#endif
+
+    int noteIndex = 0;
+    int notes = sizeof(melody_egg4) / sizeof(melody_egg4[0]) / 2;
+    int tempo = 140;
+    
+    unsigned long noteStartMs = millis();
+    int currentNoteDuration = 0;
+    bool notePlaying = false;
+    
+    uint8_t frameIdx = 0;
+    unsigned long lastFrameMs = millis();
+    
+    while (noteIndex < notes * 2 || notePlaying) {
+      unsigned long now = millis();
+      
+      // Update Song Note
+      if (!notePlaying && noteIndex < notes * 2) {
+        int freq = pgm_read_word(&melody_egg4[noteIndex]);
+        int divider = pgm_read_word(&melody_egg4[noteIndex + 1]);
+        noteIndex += 2;
+        
+        if (divider > 0) {
+          currentNoteDuration = (60000UL * 4) / tempo / divider;
+        } else {
+          currentNoteDuration = (60000UL * 4) / tempo / abs(divider);
+          currentNoteDuration = currentNoteDuration * 1.5;
+        }
+        
+#if defined(ESP32)
+        if (freq > 0) {
+          esp32_tone(PIN_BUZZER, freq, 0, TONE_CHANNEL);
+        } else {
+          esp32_noTone(PIN_BUZZER, TONE_CHANNEL);
+        }
+#endif
+        noteStartMs = now;
+        notePlaying = true;
+      }
+      
+      // Stop note after 70% duration (staccato)
+      if (notePlaying) {
+        unsigned long elapsed = now - noteStartMs;
+        if (elapsed >= (unsigned long)currentNoteDuration) {
+          notePlaying = false;
+        } else if (elapsed >= (unsigned long)(currentNoteDuration * 0.7)) {
+#if defined(ESP32)
+          esp32_noTone(PIN_BUZZER, TONE_CHANNEL);
+#endif
+        }
+      }
+      
+      // Update Animation Frame (80ms interval)
+      if (now - lastFrameMs >= 80) {
+        lastFrameMs = now;
+        
+        display.firstPage();
+        do {
+          const uint8_t* ptr = (const uint8_t*)pgm_read_ptr(&frames_egg4[frameIdx]);
+          display.drawBitmap(0, 0, 16, 64, ptr);
+        } while (display.nextPage());
+        
+        frameIdx = (frameIdx + 1) % 122;
+      }
+      
+      delay(5);
+    }
+    
+#if defined(ESP32)
+    esp32_noTone(PIN_BUZZER, TONE_CHANNEL);
+#endif
+  }
+  
+  last_activity_time = millis();
+}
+
 void displayTama();
+
+// ==========================================================================
+//  Temporizador Pomodoro Helpers Implementations
+// ==========================================================================
+void savePomodoroConfig(uint8_t work, uint8_t s_break, uint8_t l_break) {
+  EEPROM.write(EEPROM_MAX_SIZE, 0x55); // Magic byte
+  EEPROM.write(EEPROM_MAX_SIZE + 1, work);
+  EEPROM.write(EEPROM_MAX_SIZE + 2, s_break);
+  EEPROM.write(EEPROM_MAX_SIZE + 3, l_break);
+  EEPROM.commit();
+}
+
+bool loadPomodoroConfig(uint8_t &work, uint8_t &s_break, uint8_t &l_break) {
+  uint8_t magic = EEPROM.read(EEPROM_MAX_SIZE);
+  if (magic == 0x55) {
+    uint8_t w = EEPROM.read(EEPROM_MAX_SIZE + 1);
+    uint8_t sb = EEPROM.read(EEPROM_MAX_SIZE + 2);
+    uint8_t lb = EEPROM.read(EEPROM_MAX_SIZE + 3);
+    if (w > 0 && w < 60 && sb > 0 && sb < 60 && lb > 0 && lb < 60) {
+      work = w;
+      s_break = sb;
+      l_break = lb;
+      return true;
+    }
+  }
+  return false;
+}
+
+void savePomodoroState() {
+  if (!pomo_configured) return;
+  EEPROM.write(EEPROM_MAX_SIZE + 4, pomo_active ? 1 : 0);
+  EEPROM.write(EEPROM_MAX_SIZE + 5, pomo_phase);
+  EEPROM.put(EEPROM_MAX_SIZE + 6, pomo_seconds_left);
+  EEPROM.commit();
+  Serial.print(F("[Pomodoro] Estado de ejecucion guardado: active="));
+  Serial.print(pomo_active);
+  Serial.print(F(", phase="));
+  Serial.print(pomo_phase);
+  Serial.print(F(", seconds_left="));
+  Serial.println(pomo_seconds_left);
+}
+
+void loadPomodoroState() {
+  if (!pomo_configured) return;
+  uint8_t active = EEPROM.read(EEPROM_MAX_SIZE + 4);
+  if (active == 0 || active == 1) {
+    pomo_active = (active == 1);
+  } else {
+    pomo_active = false;
+  }
+  
+  uint8_t phase = EEPROM.read(EEPROM_MAX_SIZE + 5);
+  if (phase < 8) {
+    pomo_phase = phase;
+  } else {
+    pomo_phase = 0;
+  }
+  
+  uint32_t sec_left = 0;
+  EEPROM.get(EEPROM_MAX_SIZE + 6, sec_left);
+  uint32_t max_dur = get_pomo_phase_duration_seconds(pomo_phase);
+  if (sec_left <= max_dur) {
+    pomo_seconds_left = sec_left;
+  } else {
+    pomo_seconds_left = max_dur;
+  }
+  
+  Serial.print(F("[Pomodoro] Estado de ejecucion cargado: active="));
+  Serial.print(pomo_active);
+  Serial.print(F(", phase="));
+  Serial.print(pomo_phase);
+  Serial.print(F(", seconds_left="));
+  Serial.println(pomo_seconds_left);
+}
+
+uint32_t get_pomo_phase_duration_seconds(uint8_t phase) {
+  if (phase % 2 == 0) {
+    return (uint32_t)pomo_work_time * 60;
+  } else if (phase == 7) {
+    return (uint32_t)pomo_long_break * 60;
+  } else {
+    return (uint32_t)pomo_short_break * 60;
+  }
+}
+
+const char* get_pomo_phase_name(uint8_t phase) {
+  switch(phase) {
+    case 0: return "Trabajo 1/4";
+    case 1: return "Descanso Corto 1";
+    case 2: return "Trabajo 2/4";
+    case 3: return "Descanso Corto 2";
+    case 4: return "Trabajo 3/4";
+    case 5: return "Descanso Corto 3";
+    case 6: return "Trabajo 4/4";
+    case 7: return "Descanso Largo";
+    default: return "";
+  }
+}
+
+void run_pomo_alarm() {
+  if (!pomo_alert_active) {
+    return;
+  }
+  
+  unsigned long now = millis();
+  // Casio beep cycle:
+  // 4 fast beeps (50ms ON, 50ms OFF), then a longer silence (500ms) before repeating.
+  // 8 steps:
+  // Step 0: beep 1 ON (50ms)
+  // Step 1: beep 1 OFF (50ms)
+  // Step 2: beep 2 ON (50ms)
+  // Step 3: beep 2 OFF (50ms)
+  // Step 4: beep 3 ON (50ms)
+  // Step 5: beep 3 OFF (50ms)
+  // Step 6: beep 4 ON (50ms)
+  // Step 7: beep 4 OFF (500ms)
+  uint32_t step_durations[] = { 50, 50, 50, 50, 50, 50, 50, 500 };
+  uint32_t duration = step_durations[beep_substep];
+  
+  if (now - last_beep_time >= duration) {
+    beep_substep = (beep_substep + 1) % 8;
+    last_beep_time = now;
+    if (beep_substep % 2 == 0) {
+      // Even steps are sound (using 4096 Hz to match the loudest Tamagotchi tone, which is also an authentic Casio alarm frequency)
+      esp32_tone(PIN_BUZZER, 4096, step_durations[beep_substep], TONE_CHANNEL);
+    } else {
+      // Odd steps are silence
+      esp32_noTone(PIN_BUZZER, TONE_CHANNEL);
+    }
+  }
+}
+
+void update_pomodoro_timer() {
+  if (!pomo_configured) {
+    return;
+  }
+  
+  if (pomo_active) {
+    if (pomo_seconds_left > 0) {
+      pomo_seconds_left--;
+      if (pomo_seconds_left % 60 == 0) {
+        savePomodoroState();
+      }
+    }
+    
+    if (pomo_seconds_left == 0) {
+      uint8_t old_phase = pomo_phase;
+      pomo_phase = (pomo_phase + 1) % 8;
+      pomo_seconds_left = get_pomo_phase_duration_seconds(pomo_phase);
+      savePomodoroState();
+      
+      if (old_phase % 2 == 0) {
+        if (pomo_phase == 7) {
+          strcpy(pomo_alert_msg1, "Se acabo el trabajo.");
+          strcpy(pomo_alert_msg2, "Empieza descanso largo");
+        } else {
+          strcpy(pomo_alert_msg1, "Se acabo el trabajo.");
+          strcpy(pomo_alert_msg2, "Empieza descanso corto");
+        }
+      } else {
+        strcpy(pomo_alert_msg1, "Se acabo el descanso.");
+        strcpy(pomo_alert_msg2, "Empieza el trabajo!");
+      }
+      
+      pomo_alert_active = true;
+      beep_substep = 0;
+      last_beep_time = millis();
+      esp32_tone(PIN_BUZZER, 4096, 50, TONE_CHANNEL); // Start the first beep immediately
+      
+      if (screen_sleeping) {
+        wake_up_screen();
+      }
+      displayTama();
+      
+      Serial.print(F("[Pomodoro] Transitioned from phase "));
+      Serial.print(old_phase);
+      Serial.print(F(" to "));
+      Serial.println(pomo_phase);
+    } else {
+      if (pomodoro_screen_active && !pomo_alert_active && !screen_sleeping) {
+        displayTama();
+      }
+    }
+  }
+}
 
 void wake_up_screen() {
   if (screen_sleeping) {
@@ -383,6 +752,12 @@ static void hal_set_frequency(u32_t freq)
 static void hal_play_frequency(bool_t en)
 {
 #ifdef ENABLE_TAMA_SOUND
+  // Si la alarma de Pomodoro está activa, ignoramos los sonidos del Tamagotchi
+  // para evitar que interfieran con la señal y provoquen un tono distorsionado ("con gripe").
+  if (pomo_alert_active) {
+    return;
+  }
+
   if (en)
   {
     wake_up_screen();
@@ -534,14 +909,17 @@ static int hal_handler(void)
   static bool prev_l = false;  // GPIO 25
   static bool prev_m = false;  // GPIO 26
   static bool prev_r = false;  // GPIO 27
+  static bool prev_4 = false;  // GPIO 33
 
-  // Debounce de 300ms por pin
+  // Debounce por pin
   static bool debounced_l = false;
   static bool debounced_m = false;
   static bool debounced_r = false;
+  static bool debounced_4 = false;
   static unsigned long last_time_l = 0;
   static unsigned long last_time_m = 0;
   static unsigned long last_time_r = 0;
+  static unsigned long last_time_4 = 0;
 
   unsigned long now = millis();
 
@@ -549,9 +927,10 @@ static int hal_handler(void)
   bool raw_l = (digitalRead(PIN_BTN_L) == BUTTON_VOLTAGE_LEVEL_PRESSED); // GPIO 25
   bool raw_m = (digitalRead(PIN_BTN_M) == BUTTON_VOLTAGE_LEVEL_PRESSED); // GPIO 26
   bool raw_r = (digitalRead(PIN_BTN_R) == BUTTON_VOLTAGE_LEVEL_PRESSED); // GPIO 27
+  bool raw_4 = (digitalRead(PIN_BTN_4) == BUTTON_VOLTAGE_LEVEL_PRESSED); // GPIO 33
 
   // Registrar actividad por pulsación física
-  if (raw_l || raw_m || raw_r) {
+  if (raw_l || raw_m || raw_r || raw_4) {
     if (screen_sleeping) {
       wake_up_screen();
     } else {
@@ -559,7 +938,7 @@ static int hal_handler(void)
     }
   }
 
-  // Debounce: cambiar estado solo si han pasado 300ms desde el último cambio
+  // Debounce: cambiar estado solo si han pasado BTN_DEBOUNCE_MS desde el último cambio
   if (raw_l != debounced_l && (now - last_time_l >= BTN_DEBOUNCE_MS)) {
     debounced_l = raw_l;
     last_time_l = now;
@@ -572,15 +951,129 @@ static int hal_handler(void)
     debounced_r = raw_r;
     last_time_r = now;
   }
+  if (raw_4 != debounced_4 && (now - last_time_4 >= BTN_DEBOUNCE_MS)) {
+    debounced_4 = raw_4;
+    last_time_4 = now;
+  }
 
   bool btn_l = debounced_l;  // GPIO 25
   bool btn_m = debounced_m;  // GPIO 26
   bool btn_r = debounced_r;  // GPIO 27
+  bool btn_4 = debounced_4;  // GPIO 33
 
   // Detección de flancos ascendentes (pulsación)
   bool pressed_l = btn_l && !prev_l;
   bool pressed_m = btn_m && !prev_m;
   bool pressed_r = btn_r && !prev_r;
+  bool pressed_4 = btn_4 && !prev_4;
+
+  // ------------------------------------------------------------------
+  //  Manejo de Alerta/Notificación Pomodoro (Interrupción Prioritaria)
+  // ------------------------------------------------------------------
+  if (pomo_alert_active) {
+    if (pressed_l || pressed_m || pressed_r || pressed_4) {
+      pomo_alert_active = false;
+      esp32_noTone(PIN_BUZZER, TONE_CHANNEL);
+      displayTama(); // Redibujar pantalla inmediatamente para quitar aviso
+    }
+    prev_l = btn_l; prev_m = btn_m; prev_r = btn_r; prev_4 = btn_4;
+    return 0;
+  }
+
+  // ------------------------------------------------------------------
+  //  Manejo de Pantallas Pomodoro (Activo)
+  // ------------------------------------------------------------------
+  if (pomodoro_screen_active) {
+    // GPIO 33 (btn_4): Salir de Pomodoro y volver a Tamagotchi normal
+    if (pressed_4) {
+      pomodoro_screen_active = false;
+      displayTama(); // Redibujar Tamagotchi
+      prev_l = btn_l; prev_m = btn_m; prev_r = btn_r; prev_4 = btn_4;
+      return 0;
+    }
+
+    if (pomo_screen_state == POMO_CONF_WORK) {
+      if (getButtonPress(PIN_BTN_R)) {
+        pomo_temp_work++;
+        if (pomo_temp_work > 59) pomo_temp_work = 1;
+        displayTama();
+      }
+      if (pressed_l) {
+        pomo_screen_state = POMO_CONF_SHORT;
+        displayTama();
+      }
+    }
+    else if (pomo_screen_state == POMO_CONF_SHORT) {
+      if (getButtonPress(PIN_BTN_R)) {
+        pomo_temp_short++;
+        if (pomo_temp_short > 59) pomo_temp_short = 1;
+        displayTama();
+      }
+      if (pressed_l) {
+        pomo_screen_state = POMO_CONF_LONG;
+        displayTama();
+      }
+    }
+    else if (pomo_screen_state == POMO_CONF_LONG) {
+      if (getButtonPress(PIN_BTN_R)) {
+        pomo_temp_long++;
+        if (pomo_temp_long > 59) pomo_temp_long = 1;
+        displayTama();
+      }
+      if (pressed_l) {
+        pomo_work_time = pomo_temp_work;
+        pomo_short_break = pomo_temp_short;
+        pomo_long_break = pomo_temp_long;
+        pomo_configured = true;
+        savePomodoroConfig(pomo_work_time, pomo_short_break, pomo_long_break);
+        
+        // Reiniciar estado del temporizador
+        pomo_phase = 0;
+        pomo_seconds_left = get_pomo_phase_duration_seconds(0);
+        pomo_active = false;
+        savePomodoroState(); // Guardamos el estado reiniciado
+        
+        pomo_screen_state = POMO_MAIN;
+        displayTama();
+      }
+    }
+    else {
+      // Main Pomodoro Screen
+      // GPIO 26 (pressed_m): Play / Pause
+      if (pressed_m) {
+        pomo_active = !pomo_active;
+        savePomodoroState(); // Guardamos el estado al pausar/reanudar
+        displayTama();
+      }
+      // GPIO 25 (pressed_l): Entrar a reconfiguración
+      if (pressed_l) {
+        pomo_temp_work = pomo_work_time;
+        pomo_temp_short = pomo_short_break;
+        pomo_temp_long = pomo_long_break;
+        pomo_screen_state = POMO_CONF_WORK;
+        displayTama();
+      }
+    }
+
+    prev_l = btn_l; prev_m = btn_m; prev_r = btn_r; prev_4 = btn_4;
+    return 0;
+  }
+
+  // GPIO 33 (btn_4): Activa Pomodoro desde el juego/estado normal
+  if (pressed_4) {
+    pomodoro_screen_active = true;
+    if (!pomo_configured) {
+      pomo_temp_work = 25;
+      pomo_temp_short = 5;
+      pomo_temp_long = 15;
+      pomo_screen_state = POMO_CONF_WORK;
+    } else {
+      pomo_screen_state = POMO_MAIN;
+    }
+    displayTama();
+    prev_l = btn_l; prev_m = btn_m; prev_r = btn_r; prev_4 = btn_4;
+    return 0;
+  }
 
   // Máquina de estados para secuencia de Easter Egg 1: GPIO27 -> GPIO25 -> GPIO27 -> GPIO26 (< 3s)
   static int seq_step = 0;
@@ -593,6 +1086,10 @@ static int hal_handler(void)
   // Máquina de estados para secuencia de Easter Egg 3: GPIO26 -> GPIO26 -> GPIO25 -> GPIO25 -> GPIO27 -> GPIO27 -> GPIO26 (< 5s)
   static int seq3_step = 0;
   static unsigned long seq3_start_time = 0;
+
+  // Máquina de estados para secuencia de Easter Egg 4: GPIO25 -> GPIO26 -> GPIO27 -> GPIO27 -> GPIO26 -> GPIO25 -> GPIO26 (< 5s)
+  static int seq4_step = 0;
+  static unsigned long seq4_start_time = 0;
 
   if (pressed_l || pressed_m || pressed_r) {
     unsigned long current_time = millis();
@@ -608,6 +1105,10 @@ static int hal_handler(void)
     // Reset de tiempo para secuencia 3
     if (seq3_step > 0 && (current_time - seq3_start_time > 5000)) {
       seq3_step = 0;
+    }
+    // Reset de tiempo para secuencia 4
+    if (seq4_step > 0 && (current_time - seq4_start_time > 5000)) {
+      seq4_step = 0;
     }
 
     // --- Máquina para Secuencia 1 ---
@@ -770,6 +1271,79 @@ static int hal_handler(void)
         if (seq3_step == 1) seq3_start_time = current_time;
       }
     }
+
+    // --- Máquina para Secuencia 4 ---
+    if (seq4_step == 0) {
+      if (pressed_l) { // GPIO 25
+        seq4_step = 1;
+        seq4_start_time = current_time;
+        Serial.println(F("[EasterEgg4] Seq step 1: GPIO25 pressed"));
+      }
+    } else if (seq4_step == 1) {
+      if (pressed_m) { // GPIO 26
+        seq4_step = 2;
+        Serial.println(F("[EasterEgg4] Seq step 2: GPIO26 pressed"));
+      } else if (pressed_l) {
+        seq4_step = 1;
+        seq4_start_time = current_time;
+      } else {
+        seq4_step = 0;
+      }
+    } else if (seq4_step == 2) {
+      if (pressed_r) { // GPIO 27
+        seq4_step = 3;
+        Serial.println(F("[EasterEgg4] Seq step 3: GPIO27 pressed"));
+      } else if (pressed_l) {
+        seq4_step = 1;
+        seq4_start_time = current_time;
+      } else {
+        seq4_step = 0;
+      }
+    } else if (seq4_step == 3) {
+      if (pressed_r) { // GPIO 27
+        seq4_step = 4;
+        Serial.println(F("[EasterEgg4] Seq step 4: GPIO27 pressed"));
+      } else if (pressed_l) {
+        seq4_step = 1;
+        seq4_start_time = current_time;
+      } else {
+        seq4_step = 0;
+      }
+    } else if (seq4_step == 4) {
+      if (pressed_m) { // GPIO 26
+        seq4_step = 5;
+        Serial.println(F("[EasterEgg4] Seq step 5: GPIO26 pressed"));
+      } else if (pressed_l) {
+        seq4_step = 1;
+        seq4_start_time = current_time;
+      } else {
+        seq4_step = 0;
+      }
+    } else if (seq4_step == 5) {
+      if (pressed_l) { // GPIO 25
+        seq4_step = 6;
+        Serial.println(F("[EasterEgg4] Seq step 6: GPIO25 pressed"));
+      } else {
+        seq4_step = 0;
+      }
+    } else if (seq4_step == 6) {
+      if (pressed_m) { // GPIO 26
+        seq4_step = 0;
+        Serial.println(F("[EasterEgg4] Seq complete! Activating Easter Egg 4"));
+        triggerEasterEgg4();
+        // Limpiamos los flancos detectados y debounces
+        debounced_l = raw_l = false;
+        debounced_m = raw_m = false;
+        debounced_r = raw_r = false;
+        btn_l = btn_m = btn_r = false;
+        pressed_l = pressed_m = pressed_r = false;
+      } else if (pressed_l) {
+        seq4_step = 1;
+        seq4_start_time = current_time;
+      } else {
+        seq4_step = 0;
+      }
+    }
   }
 
   // ------------------------------------------------------------------
@@ -832,8 +1406,8 @@ static int hal_handler(void)
         cpu_get_state(&cpuState);
         if (cpuState.memory != nullptr)
         {
-          int clock_hours = cpuState.memory[37] * 10 + cpuState.memory[36];
-          bool clock_is_pm = cpuState.memory[38] == 1;
+          int clock_hours = get_ram_nibble(cpuState.memory, 74) * 10 + get_ram_nibble(cpuState.memory, 72);
+          bool clock_is_pm = get_ram_nibble(cpuState.memory, 76) == 1;
 
           int h24 = (clock_hours % 12) + (clock_is_pm ? 12 : 0);
           h24 = (h24 + 1) % 24;
@@ -841,9 +1415,9 @@ static int hal_handler(void)
           if (clock_hours == 0) clock_hours = 12;
           clock_is_pm = (h24 >= 12);
 
-          cpuState.memory[36] = clock_hours % 10;
-          cpuState.memory[37] = clock_hours / 10;
-          cpuState.memory[38] = clock_is_pm ? 1 : 0;
+          set_ram_nibble(cpuState.memory, 72, clock_hours % 10);
+          set_ram_nibble(cpuState.memory, 74, clock_hours / 10);
+          set_ram_nibble(cpuState.memory, 76, clock_is_pm ? 1 : 0);
           cpu_set_state(&cpuState);
 
           Serial.print(F("[P1 CONFIG] Horas -> "));
@@ -858,10 +1432,10 @@ static int hal_handler(void)
         cpu_get_state(&cpuState);
         if (cpuState.memory != nullptr)
         {
-          int clock_minutes = cpuState.memory[33] * 10 + cpuState.memory[32];
+          int clock_minutes = get_ram_nibble(cpuState.memory, 66) * 10 + get_ram_nibble(cpuState.memory, 64);
           clock_minutes = (clock_minutes + 1) % 60;
-          cpuState.memory[32] = clock_minutes % 10;
-          cpuState.memory[33] = clock_minutes / 10;
+          set_ram_nibble(cpuState.memory, 64, clock_minutes % 10);
+          set_ram_nibble(cpuState.memory, 66, clock_minutes / 10);
           cpu_set_state(&cpuState);
 
           Serial.print(F("[P1 CONFIG] Minutos -> "));
@@ -877,9 +1451,9 @@ static int hal_handler(void)
         cpu_sync_ref_timestamp();
 
         if (cpuState.memory != nullptr) {
-          int saved_h = cpuState.memory[37] * 10 + cpuState.memory[36];
-          int saved_m = cpuState.memory[33] * 10 + cpuState.memory[32];
-          bool saved_pm = cpuState.memory[38] == 1;
+          int saved_h = get_ram_nibble(cpuState.memory, 74) * 10 + get_ram_nibble(cpuState.memory, 72);
+          int saved_m = get_ram_nibble(cpuState.memory, 66) * 10 + get_ram_nibble(cpuState.memory, 64);
+          bool saved_pm = get_ram_nibble(cpuState.memory, 76) == 1;
           Serial.print(F("[P1 CONFIG] Hora final guardada: "));
           Serial.print(saved_h);
           Serial.print(":");
@@ -928,6 +1502,7 @@ static int hal_handler(void)
   prev_l = btn_l;
   prev_m = btn_m;
   prev_r = btn_r;
+  prev_4 = btn_4;
   return 0;
 }
 
@@ -987,6 +1562,107 @@ void displayTama()
   if (!display_enabled) return;
   if (screen_sleeping) return;
   display.clearBuffer(); // Limpieza de búfer forzada para evitar basura en pantalla (cuadros blancos)
+
+  if (pomo_alert_active) {
+    display.firstPage();
+    do {
+      // Draw alert screen
+      display.drawFrame(5, 5, 118, 54);
+      display.setFont(u8g2_font_helvB10_tf);
+      const char* notif_str = "NOTIFICACION";
+      int notif_width = display.getStrWidth(notif_str);
+      int notif_x = 5 + (118 - notif_width) / 2; // Center text in the 118px frame starting at x=5
+      display.drawStr(notif_x, 22, notif_str);
+      display.setFont(u8g2_font_5x7_tf);
+      display.drawStr(12, 38, pomo_alert_msg1);
+      display.drawStr(12, 48, pomo_alert_msg2);
+    } while (display.nextPage());
+    return;
+  }
+
+  if (pomodoro_screen_active) {
+    display.firstPage();
+    do {
+      if (pomo_screen_state == POMO_CONF_WORK) {
+        // Screen 1: Work Time
+        display.setFont(u8g2_font_helvB10_tf);
+        display.drawStr(5, 15, "Pomodoro Timer");
+        display.drawHLine(5, 18, 118);
+        display.setFont(u8g2_font_5x7_tf);
+        display.drawStr(5, 30, "Tiempo de trabajo:");
+        char buf[30];
+        sprintf(buf, "%d min", pomo_temp_work);
+        display.setFont(u8g2_font_helvB10_tf);
+        display.drawStr(5, 45, buf);
+        display.setFont(u8g2_font_5x7_tf);
+        display.drawStr(5, 58, "K3: +1 min   K1: Confirmar");
+      }
+      else if (pomo_screen_state == POMO_CONF_SHORT) {
+        // Screen 2: Short Break
+        display.setFont(u8g2_font_helvB10_tf);
+        display.drawStr(5, 15, "Pomodoro Timer");
+        display.drawHLine(5, 18, 118);
+        display.setFont(u8g2_font_5x7_tf);
+        display.drawStr(5, 30, "Descanso corto:");
+        char buf[30];
+        sprintf(buf, "%d min", pomo_temp_short);
+        display.setFont(u8g2_font_helvB10_tf);
+        display.drawStr(5, 45, buf);
+        display.setFont(u8g2_font_5x7_tf);
+        display.drawStr(5, 58, "K3: +1 min   K1: Confirmar");
+      }
+      else if (pomo_screen_state == POMO_CONF_LONG) {
+        // Screen 3: Long Break
+        display.setFont(u8g2_font_helvB10_tf);
+        display.drawStr(5, 15, "Pomodoro Timer");
+        display.drawHLine(5, 18, 118);
+        display.setFont(u8g2_font_5x7_tf);
+        display.drawStr(5, 30, "Descanso largo:");
+        char buf[30];
+        sprintf(buf, "%d min", pomo_temp_long);
+        display.setFont(u8g2_font_helvB10_tf);
+        display.drawStr(5, 45, buf);
+        display.setFont(u8g2_font_5x7_tf);
+        display.drawStr(5, 58, "K3: +1 min   K1: Confirmar");
+      }
+      else {
+        // Main Pomodoro Screen
+        display.setFont(u8g2_font_helvB10_tf);
+        display.drawStr(5, 14, "POMODORO");
+        display.drawHLine(5, 16, 118);
+        
+        // Phase name and Play/Pause indicator removed to prevent visual overlap
+        
+        // Time left
+        char time_buf[10];
+        sprintf(time_buf, "%02d:%02d", pomo_seconds_left / 60, pomo_seconds_left % 60);
+        display.setFont(u8g2_font_inb21_mf);
+        int w = display.getStrWidth(time_buf);
+        display.drawStr((128 - w) / 2, 50, time_buf);
+        
+        // Progress indicators (4 circles at the bottom)
+        for (int i = 0; i < 4; i++) {
+          int cx = 34 + i * 20;
+          int cy = 58;
+          display.drawCircle(cx, cy, 3);
+          
+          bool completed = false;
+          if (i == 0 && pomo_phase > 1) completed = true;
+          if (i == 1 && pomo_phase > 3) completed = true;
+          if (i == 2 && pomo_phase > 5) completed = true;
+          if (completed) {
+            display.drawDisc(cx, cy, 1);
+          } else if ((pomo_phase / 2) == i) {
+            if ((millis() / 500) % 2 == 0) {
+              display.drawDisc(cx, cy, 1);
+            }
+          }
+        }
+      }
+    } while (display.nextPage());
+    return;
+  }
+
   uint8_t j;
   display.firstPage();
 #ifdef U8G2_LAYOUT_ROTATE_180
@@ -1151,6 +1827,14 @@ void setup()
   dumpStateToSerial();
 #endif
 
+  pomo_configured = loadPomodoroConfig(pomo_work_time, pomo_short_break, pomo_long_break);
+  if (pomo_configured) {
+    loadPomodoroState();
+    Serial.println(F("[Pomodoro] Config loaded successfully."));
+  } else {
+    Serial.println(F("[Pomodoro] No config found. Assistant will run on first use."));
+  }
+
   Serial.println(F("Control nativo P1 cargado"));
 }
 
@@ -1167,6 +1851,10 @@ void loop()
   if (!screen_sleeping && (millis() - last_activity_time >= SLEEP_TIMEOUT_MS)) {
     go_to_sleep();
   }
+
+  // Alarma Casio del Pomodoro (no bloqueante)
+  run_pomo_alarm();
+
   static unsigned long last_real_second = 0;
   unsigned long now = micros();
 
@@ -1180,6 +1868,9 @@ void loop()
     last_real_second = currentMillis;
     tamalib_increment_second();
     Serial.println(F("Sincronización de segundos aplicada"));
+    
+    // Temporizador de fondo Pomodoro
+    update_pomodoro_timer();
   }
 
 #ifdef ENABLE_AUTO_SAVE_STATUS
@@ -1188,6 +1879,7 @@ void loop()
   {
     lastSaveTimestamp = millis();
     saveStateToEEPROM(&cpuState);
+    savePomodoroState();
   }
 #endif
 }
