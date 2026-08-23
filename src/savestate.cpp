@@ -146,11 +146,14 @@ bool isStateValid(const cpu_state_t* state) {
 }
 
 #define EEPROM_MAX_SIZE (sizeof(SaveHeader) + sizeof(cpu_state_t) + MEMORY_SIZE)
+#define SLOT_A_ADDR 0
+#define SLOT_B_ADDR (EEPROM_MAX_SIZE + 16)
+#define EEPROM_TOTAL_SIZE (SLOT_B_ADDR + EEPROM_MAX_SIZE)
 
 void initEEPROM()
 {
 #if defined(ESP8266) || defined(ESP32)
-    EEPROM.begin(EEPROM_MAX_SIZE + 30);
+    EEPROM.begin(EEPROM_TOTAL_SIZE);
 #endif
 }
 
@@ -161,7 +164,7 @@ bool validEEPROM()
 }
 
 void eraseStateFromEEPROM() {
-    for (uint32_t i = 0; i < EEPROM.length(); i++) {
+    for (uint32_t i = 0; i < EEPROM_TOTAL_SIZE; i++) {
         EEPROM.write(i, 0);
     }
 #if defined(ESP8266) || defined(ESP32)
@@ -170,139 +173,10 @@ void eraseStateFromEEPROM() {
     Serial.println(F("EEPROM erased completely."));
 }
 
-bool loadStateFromEEPROM(cpu_state_t* cpuState)
-{
-    if (!validEEPROM()) {
-        Serial.println(F("EEPROM magic number invalid."));
-        return false;
-    }
-
-    uint8_t magic = EEPROM.read(0);
-    cpu_get_state(cpuState);
-    u4_t *memTemp = cpuState->memory; // Keep track of current memory pointer
-
-    if (magic == EEPROM_MAGIC_LEGACY) {
-        Serial.println(F("Legacy save format detected. Loading..."));
-        
-        // Load legacy format
-        EEPROM.get(1, *cpuState);
-        for (uint32_t i = 0; i < MEMORY_SIZE; i++) {
-            memTemp[i] = EEPROM.read(1 + sizeof(cpu_state_t) + i);
-        }
-        cpuState->memory = memTemp; // Restore local heap memory pointer
-
-        // Validate state
-        if (!isStateValid(cpuState)) {
-            Serial.println(F("Legacy state failed validation! Discarding."));
-            eraseStateFromEEPROM();
-            return false;
-        }
-
-        Serial.println(F("Legacy state loaded successfully. Migrating to new checksummed format..."));
-        cpu_set_state(cpuState);
-        saveStateToEEPROM(cpuState); // Migrates to new layout
-        return true;
-    } 
-    else if (magic == EEPROM_MAGIC_NEW) {
-        Serial.println(F("New versioned/checksummed save format detected."));
-        
-        // Read header
-        SaveHeader header;
-        EEPROM.get(0, header);
-
-        // Verify version and size
-        if (header.version != 1) {
-            Serial.print(F("Unsupported save version: "));
-            Serial.println(header.version);
-            return false;
-        }
-        if (header.state_size != sizeof(cpu_state_t)) {
-            Serial.print(F("State size mismatch: EEPROM size "));
-            Serial.print(header.state_size);
-            Serial.print(F(", current code size "));
-            Serial.println(sizeof(cpu_state_t));
-            // In the future, we could add version migration code here if needed.
-            return false;
-        }
-        if (header.memory_size != MEMORY_SIZE) {
-            Serial.print(F("Memory size mismatch: EEPROM size "));
-            Serial.print(header.memory_size);
-            Serial.print(F(", current code size "));
-            Serial.println(MEMORY_SIZE);
-            return false;
-        }
-
-        // Load state and memory temp
-        cpu_state_t loadedState;
-        EEPROM.get(sizeof(SaveHeader), loadedState);
-        
-        // Allocate temp buffer to check memory checksum before overwriting current memory
-        u4_t tempMemory[MEMORY_SIZE];
-        for (uint32_t i = 0; i < MEMORY_SIZE; i++) {
-            tempMemory[i] = EEPROM.read(sizeof(SaveHeader) + sizeof(cpu_state_t) + i);
-        }
-
-        // Calculate and verify checksum
-        uint16_t calculatedChk = calculateStateChecksum(&loadedState, tempMemory, MEMORY_SIZE);
-        if (calculatedChk != header.checksum) {
-            Serial.print(F("EEPROM checksum mismatch! Calculated: 0x"));
-            Serial.print(calculatedChk, HEX);
-            Serial.print(F(", Expected: 0x"));
-            Serial.println(header.checksum, HEX);
-            eraseStateFromEEPROM();
-            return false;
-        }
-
-        // Perform bounds checks
-        loadedState.memory = tempMemory; // Temporarily point loadedState's memory to our temp buffer for validation
-        if (!isStateValid(&loadedState)) {
-            Serial.println(F("Loaded state failed integrity validation! Discarding."));
-            eraseStateFromEEPROM();
-            return false;
-        }
-
-        // Copy valid data to target state
-        *cpuState = loadedState;
-        cpuState->memory = memTemp; // Restore local pointer
-        
-        // Copy validated memory data to active emulator memory
-        for (uint32_t i = 0; i < MEMORY_SIZE; i++) {
-            memTemp[i] = tempMemory[i];
-        }
-
-        cpu_set_state(cpuState);
-
-#ifdef ENABLE_DUMP_STATE_TO_SERIAL_WHEN_START    
-        Serial.print(F("Loaded "));
-        Serial.print(EEPROM_MAX_SIZE);
-        Serial.println(F(" bytes"));
-#endif
-        return true;
-    }
-
-    return false;
-}
-
-void saveStateToEEPROM(cpu_state_t* cpuState)
+void writeStateToAddr(uint32_t startAddr, cpu_state_t* cpuState)
 {
     cpu_get_state(cpuState);
-
-    // Calculate checksum
     uint16_t chk = calculateStateChecksum(cpuState, cpuState->memory, MEMORY_SIZE);
-
-    // Read existing header to check if state hasn't changed
-    SaveHeader existingHeader;
-    EEPROM.get(0, existingHeader);
-    if (existingHeader.magic == EEPROM_MAGIC_NEW && 
-        existingHeader.version == 1 &&
-        existingHeader.state_size == sizeof(cpu_state_t) &&
-        existingHeader.memory_size == MEMORY_SIZE &&
-        existingHeader.checksum == chk) {
-#ifdef ENABLE_DUMP_STATE_TO_SERIAL_WHEN_START
-        Serial.println(F("Save skipped: State unchanged (checksum match)."));
-#endif
-        return;
-    }
 
     // Prepare header
     SaveHeader header;
@@ -313,29 +187,159 @@ void saveStateToEEPROM(cpu_state_t* cpuState)
     header.checksum = chk;
 
     // Write header
-    EEPROM.put(0, header);
+    EEPROM.put(startAddr, header);
 
     // Write cpu state
-    EEPROM.put(sizeof(SaveHeader), *cpuState);
+    EEPROM.put(startAddr + sizeof(SaveHeader), *cpuState);
 
     // Write memory
     for (uint32_t i = 0; i < MEMORY_SIZE; i++) {
-        uint32_t addr = sizeof(SaveHeader) + sizeof(cpu_state_t) + i;
+        uint32_t addr = startAddr + sizeof(SaveHeader) + sizeof(cpu_state_t) + i;
 #if defined(ESP8266) || defined(ESP32)
         EEPROM.write(addr, cpuState->memory[i]);
 #else
         EEPROM.update(addr, cpuState->memory[i]);
 #endif
     }
+}
 
+bool loadStateFromAddr(uint32_t startAddr, cpu_state_t* cpuState)
+{
+    uint8_t magic = EEPROM.read(startAddr);
+    if (magic != EEPROM_MAGIC_NEW) {
+        return false;
+    }
+
+    cpu_get_state(cpuState);
+    u4_t *memTemp = cpuState->memory; // Keep track of current memory pointer
+
+    // Read header
+    SaveHeader header;
+    EEPROM.get(startAddr, header);
+
+    // Verify version and size
+    if (header.version != 1 || header.state_size != sizeof(cpu_state_t) || header.memory_size != MEMORY_SIZE) {
+        return false;
+    }
+
+    // Load state and memory temp
+    cpu_state_t loadedState;
+    EEPROM.get(startAddr + sizeof(SaveHeader), loadedState);
+    
+    // Allocate temp buffer to check memory checksum before overwriting current memory
+    u4_t tempMemory[MEMORY_SIZE];
+    for (uint32_t i = 0; i < MEMORY_SIZE; i++) {
+        tempMemory[i] = EEPROM.read(startAddr + sizeof(SaveHeader) + sizeof(cpu_state_t) + i);
+    }
+
+    // Calculate and verify checksum
+    uint16_t calculatedChk = calculateStateChecksum(&loadedState, tempMemory, MEMORY_SIZE);
+    if (calculatedChk != header.checksum) {
+        return false;
+    }
+
+    // Perform bounds checks
+    loadedState.memory = tempMemory; // Temporarily point loadedState's memory to our temp buffer for validation
+    if (!isStateValid(&loadedState)) {
+        return false;
+    }
+
+    // Copy valid data to target state
+    *cpuState = loadedState;
+    cpuState->memory = memTemp; // Restore local pointer
+    
+    // Copy validated memory data to active emulator memory
+    for (uint32_t i = 0; i < MEMORY_SIZE; i++) {
+        memTemp[i] = tempMemory[i];
+    }
+
+    cpu_set_state(cpuState);
+    return true;
+}
+
+bool loadStateFromEEPROM(cpu_state_t* cpuState)
+{
+    // 1. Check legacy format first
+    uint8_t magic = EEPROM.read(0);
+    if (magic == EEPROM_MAGIC_LEGACY) {
+        Serial.println(F("Legacy save format detected. Loading..."));
+        cpu_get_state(cpuState);
+        u4_t *memTemp = cpuState->memory;
+        EEPROM.get(1, *cpuState);
+        for (uint32_t i = 0; i < MEMORY_SIZE; i++) {
+            memTemp[i] = EEPROM.read(1 + sizeof(cpu_state_t) + i);
+        }
+        cpuState->memory = memTemp;
+
+        if (!isStateValid(cpuState)) {
+            Serial.println(F("Legacy state failed validation! Discarding."));
+            eraseStateFromEEPROM();
+            return false;
+        }
+
+        Serial.println(F("Legacy state loaded successfully. Migrating to new double-buffered format..."));
+        cpu_set_state(cpuState);
+        saveStateToEEPROM(cpuState); // Migrates to Slot A and Slot B
+        return true;
+    }
+
+    // 2. Try Slot A (Primary)
+    Serial.println(F("Trying to load state from Slot A (Primary)..."));
+    if (loadStateFromAddr(SLOT_A_ADDR, cpuState)) {
+        Serial.println(F("Slot A loaded successfully."));
+        return true;
+    }
+
+    // 3. Try Slot B (Backup)
+    Serial.println(F("Slot A failed! Trying to load state from Slot B (Backup)..."));
+    if (loadStateFromAddr(SLOT_B_ADDR, cpuState)) {
+        Serial.println(F("Slot B loaded successfully. Recovering Slot A..."));
+        writeStateToAddr(SLOT_A_ADDR, cpuState);
+#if defined(ESP8266) || defined(ESP32)
+        EEPROM.commit();
+#endif
+        return true;
+    }
+
+    // 4. Both failed!
+    Serial.println(F("Both save slots failed checksum or validation! Erasing EEPROM..."));
+    eraseStateFromEEPROM();
+    return false;
+}
+
+void saveStateToEEPROM(cpu_state_t* cpuState)
+{
+    cpu_get_state(cpuState);
+    uint16_t chk = calculateStateChecksum(cpuState, cpuState->memory, MEMORY_SIZE);
+
+    // Read Slot A header to check if state hasn't changed
+    SaveHeader slotAHeader;
+    EEPROM.get(SLOT_A_ADDR, slotAHeader);
+    if (slotAHeader.magic == EEPROM_MAGIC_NEW && 
+        slotAHeader.version == 1 &&
+        slotAHeader.state_size == sizeof(cpu_state_t) &&
+        slotAHeader.memory_size == MEMORY_SIZE &&
+        slotAHeader.checksum == chk) {
+#ifdef ENABLE_DUMP_STATE_TO_SERIAL_WHEN_START
+        Serial.println(F("Save skipped: State unchanged (checksum match)."));
+#endif
+        return;
+    }
+
+    // Write to Slot A first
+    writeStateToAddr(SLOT_A_ADDR, cpuState);
 #if defined(ESP8266) || defined(ESP32)
     EEPROM.commit();
 #endif
 
-#ifdef ENABLE_DUMP_STATE_TO_SERIAL_WHEN_START    
-    Serial.print(F("Saved "));
-    Serial.print(EEPROM_MAX_SIZE);
-    Serial.print(F(" bytes (Checksum: 0x"));
+    // Write to Slot B second
+    writeStateToAddr(SLOT_B_ADDR, cpuState);
+#if defined(ESP8266) || defined(ESP32)
+    EEPROM.commit();
+#endif
+
+#ifdef ENABLE_DUMP_STATE_TO_SERIAL_WHEN_START
+    Serial.print(F("Saved successfully to Slot A and Slot B (Checksum: 0x"));
     Serial.print(chk, HEX);
     Serial.println(F(")"));
 #endif
