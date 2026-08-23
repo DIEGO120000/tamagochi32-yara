@@ -866,7 +866,7 @@ static bool getButtonPress(int pin) {
   unsigned long now = millis();
   bool current = (digitalRead(pin) == BUTTON_VOLTAGE_LEVEL_PRESSED);
 
-  if (pin == 26) {
+  if (pin == PIN_BTN_M) {
     if (btn26_ignoreNextPulse && (now - btn26_lastPulseTime >= 200)) {
       btn26_ignoreNextPulse = false;
     }
@@ -906,7 +906,7 @@ static bool getButtonPress(int pin) {
       btn26_wasPressed = false;
     }
   }
-  else if (pin == 27) {
+  else if (pin == PIN_BTN_R) {
     if (btn27_ignoreNextPulse && (now - btn27_lastPulseTime >= 200)) {
       btn27_ignoreNextPulse = false;
     }
@@ -1060,6 +1060,11 @@ static int hal_handler(void)
         if (pomo_temp_work > 59) pomo_temp_work = 1;
         displayTama();
       }
+      if (getButtonPress(PIN_BTN_M)) {
+        pomo_temp_work--;
+        if (pomo_temp_work < 1) pomo_temp_work = 59;
+        displayTama();
+      }
       if (pressed_l) {
         pomo_screen_state = POMO_CONF_SHORT;
         displayTama();
@@ -1071,6 +1076,11 @@ static int hal_handler(void)
         if (pomo_temp_short > 59) pomo_temp_short = 1;
         displayTama();
       }
+      if (getButtonPress(PIN_BTN_M)) {
+        pomo_temp_short--;
+        if (pomo_temp_short < 1) pomo_temp_short = 59;
+        displayTama();
+      }
       if (pressed_l) {
         pomo_screen_state = POMO_CONF_LONG;
         displayTama();
@@ -1080,6 +1090,11 @@ static int hal_handler(void)
       if (getButtonPress(PIN_BTN_R)) {
         pomo_temp_long++;
         if (pomo_temp_long > 59) pomo_temp_long = 1;
+        displayTama();
+      }
+      if (getButtonPress(PIN_BTN_M)) {
+        pomo_temp_long--;
+        if (pomo_temp_long < 1) pomo_temp_long = 59;
         displayTama();
       }
       if (pressed_l) {
@@ -1620,16 +1635,18 @@ void drawTamaSelection(uint8_t y)
 }
 
 void measure_battery() {
-  // 1. Leer voltaje real de la batería en el pin ADC dedicado (usando la calibración de fábrica en milivoltios)
-  // Tomamos 50 lecturas para un promedio muy robusto antes de congelar el valor en pantalla
-  float sum_mv = 0;
+  // 1. Leer voltaje real de la batería usando lectura analógica estándar de Arduino
+  uint32_t sum_raw = 0;
   for (int i = 0; i < 50; i++) {
-    sum_mv += analogReadMilliVolts(PIN_BATTERY);
+    sum_raw += analogRead(PIN_BATTERY);
     delay(1);
   }
-  float mv_avg = sum_mv / 50.0;
+  float raw_avg = sum_raw / 50.0;
   
-  // Multiplicador de 2.40 para compensar el efecto de carga de la impedancia del divisor de 100k+100k en el ADC del ESP32
+  // Rango 0-3.3V (3300 mV) con resolución de 12 bits (4095)
+  float mv_avg = (raw_avg / 4095.0) * 3300.0;
+  
+  // Multiplicador de 2.40 para compensar el divisor de tensión y el efecto de carga del ADC
   battery_current_voltage = (mv_avg / 1000.0) * 2.40;
 
   // Mapear voltaje a porcentaje de LiPo (3.3V a 4.2V)
@@ -1637,7 +1654,9 @@ void measure_battery() {
   if (battery_current_pct > 100) battery_current_pct = 100;
   if (battery_current_pct < 0) battery_current_pct = 0;
 
-  Serial.print(F("[BATTERY] Millivolts: "));
+  Serial.print(F("[BATTERY] Raw ADC: "));
+  Serial.print(raw_avg);
+  Serial.print(F(", Millivolts: "));
   Serial.print(mv_avg);
   Serial.print(F(", Calibrated Voltage: "));
   Serial.print(battery_current_voltage);
@@ -1663,9 +1682,9 @@ void draw_battery_monitor_screen() {
     // Dibujar marco general de pantalla
     display.drawFrame(0, 0, 128, 64);
     
-    // Dibujar título "BATERIA LOLIN D32"
+    // Dibujar título "BATERIA TAMAGOCHI"
     display.setFont(u8g2_font_5x7_tf);
-    display.drawStr(5, 10, "BATERIA LOLIN D32");
+    display.drawStr(5, 10, "BATERIA TAMAGOCHI");
     display.drawHLine(5, 12, 118);
 
     // Dibujar icono de batería horizontal
@@ -1919,6 +1938,13 @@ void setup()
   WiFi.mode(WIFI_OFF);
 #endif
   btStop();
+  analogReadResolution(12);
+  analogSetAttenuation(ADC_11db);
+
+  // Resetear y liberar GPIO 1 (PIN_BATTERY) del periférico de la flash (FSPICS0) para forzarlo a modo GPIO analógico
+  gpio_reset_pin((gpio_num_t)PIN_BATTERY);
+  gpio_set_direction((gpio_num_t)PIN_BATTERY, GPIO_MODE_INPUT);
+  gpio_set_pull_mode((gpio_num_t)PIN_BATTERY, GPIO_FLOATING);
 #endif
   Serial.begin(SERIAL_BAUD);
   delay(1000); // Dar tiempo al transceptor USB-Serie para estabilizarse y no perder logs
@@ -1996,11 +2022,15 @@ void loop()
     go_to_sleep();
   }
 
-  // Control de salida del monitor de batería (después de 3.5 segundos o al soltar ambos botones)
+  // Control de salida del monitor de batería (después de 3.5 segundos)
   if (battery_screen_active) {
-    bool r_pressed = (digitalRead(PIN_BTN_R) == BUTTON_VOLTAGE_LEVEL_PRESSED);
-    bool btn4_pressed = (digitalRead(PIN_BTN_4) == BUTTON_VOLTAGE_LEVEL_PRESSED);
-    if ((!r_pressed && !btn4_pressed) || (millis() - battery_screen_start_time >= 3500)) {
+    static unsigned long last_battery_measure = 0;
+    if (millis() - last_battery_measure >= 500) {
+      last_battery_measure = millis();
+      measure_battery();
+      displayTama();
+    }
+    if (millis() - battery_screen_start_time >= 3500) {
       battery_screen_active = false;
       displayTama();
     }
