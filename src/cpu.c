@@ -1667,7 +1667,7 @@ static const op_t0 ops0[] PROGMEM = {
   {0xF38, MASK_10B      , 7 }, // SCPX
   {0xF3C, MASK_10B      , 7 }, // SCPY
   {0xD0F, 0xFCF         , 7 }, // NOT
-  {NULL, 0, 0, 0, NULL},
+  {0, 0, 0},
 };
 
 /* The E0C6S46 supported instructions */

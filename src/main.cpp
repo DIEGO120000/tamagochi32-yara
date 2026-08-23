@@ -34,6 +34,17 @@
 #endif
 #include "hpbd.h"
 
+#if defined(ESP32)
+#include "soc/soc_caps.h"
+#if SOC_WIFI_SUPPORTED
+#include <WiFi.h>
+#endif
+#include <esp_bt.h>
+#include <esp_sleep.h>
+#include <driver/gpio.h>
+#endif
+
+
 // ==========================================================================
 //  Temporizador Pomodoro Settings & State
 // ==========================================================================
@@ -102,9 +113,17 @@ static bool display_enabled = false;
 #define SLEEP_TIMEOUT_MS 60000 // 60 segundos de inactividad para suspender la pantalla
 static bool screen_sleeping = false;
 static unsigned long last_activity_time = 0;
+static bool battery_screen_active = false;
+static unsigned long battery_screen_start_time = 0;
+static int battery_current_pct = 0;
+static float battery_current_voltage = 0.0f;
+
+static cpu_state_t cpuState;
+static unsigned long lastSaveTimestamp = 0;
 
 void wake_up_screen();
 void go_to_sleep();
+void measure_battery();
 
 
 enum EstadoTamagotchi {
@@ -114,13 +133,16 @@ enum EstadoTamagotchi {
 static EstadoTamagotchi estadoActual = CONFIGURACION;
 
 #if defined(ESP32)
-// Buttons K1, K2, K3, K4 mapping for ESP32
-#define PIN_BTN_L 25   // K1 (Select / Left)
-#define PIN_BTN_M 26   // K2 (Confirm / Middle)
-#define PIN_BTN_R 27   // K3 (Cancel / Right)
-#define PIN_BTN_4 33   // K5 (Decrement / Fourth Button)
-#define PIN_BTN_RST 5  // K4 (Reset)
-#define PIN_BUZZER 15
+// Buttons mapping for ESP32-H2 SuperMini
+#define PIN_BTN_L 11   // K1 (Select / Left) -> Botón 2 (GPIO 11)
+#define PIN_BTN_M 12   // K2 (Confirm / Middle) -> Botón 3 (GPIO 12)
+#define PIN_BTN_R 13   // K3 (Cancel / Right) -> Botón 4 (GPIO 13)
+#define PIN_BTN_4 10   // K5 (Decrement / Fourth Button) -> Botón 1 (GPIO 10)
+#define PIN_BTN_RST 5  // K4 (Reset) (GPIO 5)
+#define PIN_BUZZER 3   // Buzzer (GPIO 3)
+#define PIN_SDA 22     // OLED SDA (GPIO 22)
+#define PIN_SCL 25     // OLED SCL (GPIO 25)
+#define PIN_BATTERY 1  // Battery ADC (GPIO 1)
 #define BUZZER_CHANNEL 0
 #define TONE_CHANNEL 0
 #elif defined(ESP8266)
@@ -136,19 +158,22 @@ static EstadoTamagotchi estadoActual = CONFIGURACION;
 #endif
 
 #if defined(ESP32)
+static bool esp32_buzzer_active = false;
+
 void esp32_noTone(uint8_t pin, uint8_t channel)
 {
-  ledcWrite(channel, 0);
-  ledcDetachPin(pin);
+  if (esp32_buzzer_active) {
+    noTone(pin);
+    esp32_buzzer_active = false;
+  }
   pinMode(pin, OUTPUT);
   digitalWrite(pin, LOW);
 }
 
 void esp32_tone(uint8_t pin, unsigned int frequency, unsigned long duration, uint8_t channel)
 {
-  ledcSetup(channel, frequency, 10);
-  ledcAttachPin(pin, channel);
-  ledcWrite(channel, 512); // 50% duty cycle (maximum amplitude square wave)
+  tone(pin, frequency);
+  esp32_buzzer_active = true;
 }
 #endif
 
@@ -479,6 +504,14 @@ void displayTama();
 //  Temporizador Pomodoro Helpers Implementations
 // ==========================================================================
 void savePomodoroConfig(uint8_t work, uint8_t s_break, uint8_t l_break) {
+  uint8_t magic = EEPROM.read(EEPROM_MAX_SIZE);
+  uint8_t w = EEPROM.read(EEPROM_MAX_SIZE + 1);
+  uint8_t sb = EEPROM.read(EEPROM_MAX_SIZE + 2);
+  uint8_t lb = EEPROM.read(EEPROM_MAX_SIZE + 3);
+  if (magic == 0x55 && w == work && sb == s_break && lb == l_break) {
+    return; // Configuración idéntica, saltar escritura
+  }
+
   EEPROM.write(EEPROM_MAX_SIZE, 0x55); // Magic byte
   EEPROM.write(EEPROM_MAX_SIZE + 1, work);
   EEPROM.write(EEPROM_MAX_SIZE + 2, s_break);
@@ -504,9 +537,24 @@ bool loadPomodoroConfig(uint8_t &work, uint8_t &s_break, uint8_t &l_break) {
 
 void savePomodoroState() {
   if (!pomo_configured) return;
-  EEPROM.write(EEPROM_MAX_SIZE + 4, pomo_active ? 1 : 0);
-  EEPROM.write(EEPROM_MAX_SIZE + 5, pomo_phase);
-  EEPROM.put(EEPROM_MAX_SIZE + 6, pomo_seconds_left);
+  uint8_t current_active_val = pomo_active ? 1 : 0;
+  uint8_t current_phase_val = pomo_phase;
+  uint32_t current_seconds_left_val = pomo_seconds_left;
+
+  uint8_t stored_active_val = EEPROM.read(EEPROM_MAX_SIZE + 4);
+  uint8_t stored_phase_val = EEPROM.read(EEPROM_MAX_SIZE + 5);
+  uint32_t stored_seconds_left_val = 0;
+  EEPROM.get(EEPROM_MAX_SIZE + 6, stored_seconds_left_val);
+
+  if (stored_active_val == current_active_val &&
+      stored_phase_val == current_phase_val &&
+      stored_seconds_left_val == current_seconds_left_val) {
+    return; // Estado de Pomodoro idéntico, saltar escritura
+  }
+
+  EEPROM.write(EEPROM_MAX_SIZE + 4, current_active_val);
+  EEPROM.write(EEPROM_MAX_SIZE + 5, current_phase_val);
+  EEPROM.put(EEPROM_MAX_SIZE + 6, current_seconds_left_val);
   EEPROM.commit();
   Serial.print(F("[Pomodoro] Estado de ejecucion guardado: active="));
   Serial.print(pomo_active);
@@ -674,6 +722,10 @@ void wake_up_screen() {
 
 void go_to_sleep() {
   if (!screen_sleeping) {
+#ifdef ENABLE_AUTO_SAVE_STATUS
+    saveStateToEEPROM(&cpuState);
+    savePomodoroState();
+#endif
     screen_sleeping = true;
     if (display_enabled) {
       display.setPowerSave(1); // Apagar pantalla (bajo consumo)
@@ -689,8 +741,6 @@ static uint16_t current_freq = 0;
 static bool_t matrix_buffer[LCD_HEIGHT][LCD_WIDTH / 8] = {{0}};
 // static byte runOnceBool = 0;
 static bool_t icon_buffer[ICON_NUM] = {0};
-static cpu_state_t cpuState;
-static unsigned long lastSaveTimestamp = 0;
 static long last_interaction = 0;
 /************************************/
 
@@ -960,6 +1010,18 @@ static int hal_handler(void)
   bool btn_m = debounced_m;  // GPIO 26
   bool btn_r = debounced_r;  // GPIO 27
   bool btn_4 = debounced_4;  // GPIO 33
+
+  // Detección de combinación simultánea: Botón 3 (GPIO 27) y Botón 4 (GPIO 33)
+  if (btn_r && btn_4) {
+    if (!battery_screen_active) {
+      measure_battery(); // Tomar la lectura analógica una sola vez al entrar en la pantalla
+      battery_screen_active = true;
+      battery_screen_start_time = millis();
+      displayTama();
+    }
+    prev_l = btn_l; prev_m = btn_m; prev_r = btn_r; prev_4 = btn_4;
+    return 0;
+  }
 
   // Detección de flancos ascendentes (pulsación)
   bool pressed_l = btn_l && !prev_l;
@@ -1557,11 +1619,92 @@ void drawTamaSelection(uint8_t y)
   }
 }
 
+void measure_battery() {
+  // 1. Leer voltaje real de la batería en el pin ADC dedicado (usando la calibración de fábrica en milivoltios)
+  // Tomamos 50 lecturas para un promedio muy robusto antes de congelar el valor en pantalla
+  float sum_mv = 0;
+  for (int i = 0; i < 50; i++) {
+    sum_mv += analogReadMilliVolts(PIN_BATTERY);
+    delay(1);
+  }
+  float mv_avg = sum_mv / 50.0;
+  
+  // Multiplicador de 2.40 para compensar el efecto de carga de la impedancia del divisor de 100k+100k en el ADC del ESP32
+  battery_current_voltage = (mv_avg / 1000.0) * 2.40;
+
+  // Mapear voltaje a porcentaje de LiPo (3.3V a 4.2V)
+  battery_current_pct = (int)((battery_current_voltage - 3.3) / (4.2 - 3.3) * 100.0);
+  if (battery_current_pct > 100) battery_current_pct = 100;
+  if (battery_current_pct < 0) battery_current_pct = 0;
+
+  Serial.print(F("[BATTERY] Millivolts: "));
+  Serial.print(mv_avg);
+  Serial.print(F(", Calibrated Voltage: "));
+  Serial.print(battery_current_voltage);
+  Serial.print(F("V, Pct: "));
+  Serial.print(battery_current_pct);
+  Serial.println(F("%"));
+}
+
+void draw_battery_monitor_screen() {
+  int pct = battery_current_pct;
+  float voltage = battery_current_voltage;
+
+  // 2. Calcular autonomía estimada en horas y minutos
+  // Standby (2 mA) y Activo (40 mA) con batería de 1800 mAh
+  uint32_t capacity_rem = (pct * 1800) / 100; // mAh restantes
+  
+  uint32_t active_mins = (capacity_rem * 60) / 40;
+  uint32_t standby_mins = (capacity_rem * 60) / 2;
+
+  // 3. Dibujar interfaz gráfica
+  display.firstPage();
+  do {
+    // Dibujar marco general de pantalla
+    display.drawFrame(0, 0, 128, 64);
+    
+    // Dibujar título "BATERIA LOLIN D32"
+    display.setFont(u8g2_font_5x7_tf);
+    display.drawStr(5, 10, "BATERIA LOLIN D32");
+    display.drawHLine(5, 12, 118);
+
+    // Dibujar icono de batería horizontal
+    display.drawFrame(12, 20, 34, 18); // Cuerpo
+    display.drawBox(46, 25, 3, 8);      // Polo +
+    
+    // Dibujar las 4 franjas internas (cada una representa 25%)
+    if (pct >= 25) display.drawBox(15, 23, 5, 12);
+    if (pct >= 50) display.drawBox(22, 23, 5, 12);
+    if (pct >= 75) display.drawBox(29, 23, 5, 12);
+    if (pct >= 100) display.drawBox(36, 23, 5, 12);
+
+    // Dibujar porcentaje
+    display.setFont(u8g2_font_helvB10_tf);
+    char pct_buf[10];
+    sprintf(pct_buf, "%d%%", pct);
+    display.drawStr(60, 34, pct_buf);
+
+    // Dibujar autonomía estimada
+    display.setFont(u8g2_font_5x7_tf);
+    char act_buf[35];
+    char std_buf[35];
+    sprintf(act_buf, "Uso Activo: ~%dh %02dm", active_mins / 60, active_mins % 60);
+    sprintf(std_buf, "En Reposo : ~%dh %02dm", standby_mins / 60, standby_mins % 60);
+    display.drawStr(12, 48, act_buf);
+    display.drawStr(12, 58, std_buf);
+  } while (display.nextPage());
+}
+
 void displayTama()
 {
   if (!display_enabled) return;
   if (screen_sleeping) return;
   display.clearBuffer(); // Limpieza de búfer forzada para evitar basura en pantalla (cuadros blancos)
+
+  if (battery_screen_active) {
+    draw_battery_monitor_screen();
+    return;
+  }
 
   if (pomo_alert_active) {
     display.firstPage();
@@ -1776,7 +1919,15 @@ uint8_t reverseBits(uint8_t num)
 
 void setup()
 {
+#if defined(ESP32)
+  setCpuFrequencyMhz(96); // Ajustar a 96MHz (frecuencia óptima de bus para el ESP32-H2)
+#if SOC_WIFI_SUPPORTED
+  WiFi.mode(WIFI_OFF);
+#endif
+  btStop();
+#endif
   Serial.begin(SERIAL_BAUD);
+  delay(1000); // Dar tiempo al transceptor USB-Serie para estabilizarse y no perder logs
   last_activity_time = millis();
 
   pinMode(PIN_BTN_L, INPUT_PULLUP);
@@ -1788,8 +1939,7 @@ void setup()
 #endif
 
 #if defined(ESP32)
-  ledcSetup(BUZZER_CHANNEL, NOTE_C4, 8);
-  Wire.begin(14, 12);
+  Wire.begin(PIN_SDA, PIN_SCL);
 #endif
 
   if (!display.begin()) {
@@ -1852,29 +2002,81 @@ void loop()
     go_to_sleep();
   }
 
+  // Control de salida del monitor de batería (después de 3.5 segundos o al soltar ambos botones)
+  if (battery_screen_active) {
+    bool r_pressed = (digitalRead(PIN_BTN_R) == BUTTON_VOLTAGE_LEVEL_PRESSED);
+    bool btn4_pressed = (digitalRead(PIN_BTN_4) == BUTTON_VOLTAGE_LEVEL_PRESSED);
+    if ((!r_pressed && !btn4_pressed) || (millis() - battery_screen_start_time >= 3500)) {
+      battery_screen_active = false;
+      displayTama();
+    }
+  }
+
+#if defined(ESP32)
+  // Arquitectura de Burst Emulation (Light Sleep en ráfagas)
+  // Entramos en Light Sleep solo si la pantalla está suspendida y no hay alarma de Pomodoro activa
+  if (screen_sleeping && !pomo_alert_active) {
+    // 1. Configurar botones para despertar la CPU (GPIO Interrupts)
+    gpio_wakeup_enable((gpio_num_t)PIN_BTN_L, GPIO_INTR_LOW_LEVEL);
+    gpio_wakeup_enable((gpio_num_t)PIN_BTN_M, GPIO_INTR_LOW_LEVEL);
+    gpio_wakeup_enable((gpio_num_t)PIN_BTN_R, GPIO_INTR_LOW_LEVEL);
+    gpio_wakeup_enable((gpio_num_t)PIN_BTN_4, GPIO_INTR_LOW_LEVEL);
+    gpio_wakeup_enable((gpio_num_t)PIN_BTN_RST, GPIO_INTR_LOW_LEVEL);
+    esp_sleep_enable_gpio_wakeup();
+
+    // 2. Configurar despertador por temporizador (1 segundo = 1,000,000 microsegundos)
+    esp_sleep_enable_timer_wakeup(1000000ULL);
+
+    // 3. Iniciar Light Sleep
+    esp_light_sleep_start();
+  }
+#endif
+
   // Alarma Casio del Pomodoro (no bloqueante)
   run_pomo_alarm();
 
   static unsigned long last_real_second = 0;
   unsigned long now = micros();
 
+  // Procesamiento acumulado (catch-up)
   if (now - last_cpu_step >= CPU_STEP_DELAY_US) {
-    last_cpu_step = now;
-    tamalib_mainloop_step_by_step();
+    unsigned long elapsed = now - last_cpu_step;
+    unsigned long steps = elapsed / CPU_STEP_DELAY_US;
+    
+    // Limitar ráfaga para evitar desbordamiento del watchdog (máx. 2 segundos = 25,000 pasos)
+    if (steps > 25000) {
+      steps = 25000;
+    }
+    
+    for (unsigned long i = 0; i < steps; i++) {
+      tamalib_mainloop_step_by_step();
+    }
+    last_cpu_step += steps * CPU_STEP_DELAY_US;
   }
 
   unsigned long currentMillis = millis();
   if (currentMillis - last_real_second >= 1000) {
-    last_real_second = currentMillis;
-    tamalib_increment_second();
-    Serial.println(F("Sincronización de segundos aplicada"));
+    unsigned long elapsed_ms = currentMillis - last_real_second;
+    unsigned long seconds_to_add = elapsed_ms / 1000;
     
-    // Temporizador de fondo Pomodoro
-    update_pomodoro_timer();
+    // Limitar segundos acumulados por seguridad
+    if (seconds_to_add > 10) {
+      seconds_to_add = 10;
+    }
+    
+    for (unsigned long i = 0; i < seconds_to_add; i++) {
+      tamalib_increment_second();
+      // Temporizador de fondo Pomodoro
+      update_pomodoro_timer();
+    }
+    last_real_second += seconds_to_add * 1000;
+#ifdef ENABLE_SERIAL_DEBUG_INPUT
+    Serial.println(F("Sincronización de segundos aplicada"));
+#endif
   }
 
 #ifdef ENABLE_AUTO_SAVE_STATUS
-  // Auto-guardado periódico
+  // Auto-guardado periódico (cada 5 minutos de forma ininterrumpida)
   if ((millis() - lastSaveTimestamp) > (AUTO_SAVE_MINUTES * 60 * 1000))
   {
     lastSaveTimestamp = millis();

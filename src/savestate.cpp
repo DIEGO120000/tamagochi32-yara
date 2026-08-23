@@ -290,6 +290,20 @@ void saveStateToEEPROM(cpu_state_t* cpuState)
     // Calculate checksum
     uint16_t chk = calculateStateChecksum(cpuState, cpuState->memory, MEMORY_SIZE);
 
+    // Read existing header to check if state hasn't changed
+    SaveHeader existingHeader;
+    EEPROM.get(0, existingHeader);
+    if (existingHeader.magic == EEPROM_MAGIC_NEW && 
+        existingHeader.version == 1 &&
+        existingHeader.state_size == sizeof(cpu_state_t) &&
+        existingHeader.memory_size == MEMORY_SIZE &&
+        existingHeader.checksum == chk) {
+#ifdef ENABLE_DUMP_STATE_TO_SERIAL_WHEN_START
+        Serial.println(F("Save skipped: State unchanged (checksum match)."));
+#endif
+        return;
+    }
+
     // Prepare header
     SaveHeader header;
     header.magic = EEPROM_MAGIC_NEW;
