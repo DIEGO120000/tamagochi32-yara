@@ -1737,8 +1737,6 @@ void displayTama()
         sprintf(buf, "%d min", pomo_temp_work);
         display.setFont(u8g2_font_helvB10_tf);
         display.drawStr(5, 45, buf);
-        display.setFont(u8g2_font_5x7_tf);
-        display.drawStr(5, 58, "K3: +1 min   K1: Confirmar");
       }
       else if (pomo_screen_state == POMO_CONF_SHORT) {
         // Screen 2: Short Break
@@ -1751,8 +1749,6 @@ void displayTama()
         sprintf(buf, "%d min", pomo_temp_short);
         display.setFont(u8g2_font_helvB10_tf);
         display.drawStr(5, 45, buf);
-        display.setFont(u8g2_font_5x7_tf);
-        display.drawStr(5, 58, "K3: +1 min   K1: Confirmar");
       }
       else if (pomo_screen_state == POMO_CONF_LONG) {
         // Screen 3: Long Break
@@ -1765,8 +1761,6 @@ void displayTama()
         sprintf(buf, "%d min", pomo_temp_long);
         display.setFont(u8g2_font_helvB10_tf);
         display.drawStr(5, 45, buf);
-        display.setFont(u8g2_font_5x7_tf);
-        display.drawStr(5, 58, "K3: +1 min   K1: Confirmar");
       }
       else {
         // Main Pomodoro Screen
