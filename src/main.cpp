@@ -1030,6 +1030,107 @@ static int hal_handler(void)
   bool pressed_4 = btn_4 && !prev_4;
 
   // ------------------------------------------------------------------
+  //  Secuencia secreta de formateo de EEPROM y reseteo de partida:
+  //  Orden: 1 -> 2 -> 3 -> 4 -> 4 -> 3 -> 2 -> 1 en un tiempo <= 5 seg
+  // ------------------------------------------------------------------
+  static int reset_seq_step = 0;
+  static unsigned long reset_seq_start_time = 0;
+
+  if (pressed_4 || pressed_l || pressed_m || pressed_r) {
+    unsigned long current_time = millis();
+
+    if (reset_seq_step > 0 && (current_time - reset_seq_start_time > 5000)) {
+      reset_seq_step = 0;
+    }
+
+    if (reset_seq_step == 0) {
+      if (pressed_4) { // Botón 1 (GPIO 10)
+        reset_seq_step = 1;
+        reset_seq_start_time = current_time;
+        Serial.println(F("[RESET_SEQ] Paso 1: Boton 1 pulsado"));
+      }
+    } else if (reset_seq_step == 1) {
+      if (pressed_l) { // Botón 2 (GPIO 11)
+        reset_seq_step = 2;
+        Serial.println(F("[RESET_SEQ] Paso 2: Boton 2 pulsado"));
+      } else if (pressed_4) {
+        reset_seq_step = 1;
+        reset_seq_start_time = current_time;
+      } else {
+        reset_seq_step = 0;
+      }
+    } else if (reset_seq_step == 2) {
+      if (pressed_m) { // Botón 3 (GPIO 12)
+        reset_seq_step = 3;
+        Serial.println(F("[RESET_SEQ] Paso 3: Boton 3 pulsado"));
+      } else if (pressed_4) {
+        reset_seq_step = 1;
+        reset_seq_start_time = current_time;
+      } else {
+        reset_seq_step = 0;
+      }
+    } else if (reset_seq_step == 3) {
+      if (pressed_r) { // Botón 4 (GPIO 13)
+        reset_seq_step = 4;
+        Serial.println(F("[RESET_SEQ] Paso 4: Boton 4 pulsado"));
+      } else if (pressed_4) {
+        reset_seq_step = 1;
+        reset_seq_start_time = current_time;
+      } else {
+        reset_seq_step = 0;
+      }
+    } else if (reset_seq_step == 4) {
+      if (pressed_r) { // Botón 4 (GPIO 13)
+        reset_seq_step = 5;
+        Serial.println(F("[RESET_SEQ] Paso 5: Boton 4 pulsado"));
+      } else if (pressed_4) {
+        reset_seq_step = 1;
+        reset_seq_start_time = current_time;
+      } else {
+        reset_seq_step = 0;
+      }
+    } else if (reset_seq_step == 5) {
+      if (pressed_m) { // Botón 3 (GPIO 12)
+        reset_seq_step = 6;
+        Serial.println(F("[RESET_SEQ] Paso 6: Boton 3 pulsado"));
+      } else if (pressed_4) {
+        reset_seq_step = 1;
+        reset_seq_start_time = current_time;
+      } else {
+        reset_seq_step = 0;
+      }
+    } else if (reset_seq_step == 6) {
+      if (pressed_l) { // Botón 2 (GPIO 11)
+        reset_seq_step = 7;
+        Serial.println(F("[RESET_SEQ] Paso 7: Boton 2 pulsado"));
+      } else if (pressed_4) {
+        reset_seq_step = 1;
+        reset_seq_start_time = current_time;
+      } else {
+        reset_seq_step = 0;
+      }
+    } else if (reset_seq_step == 7) {
+      if (pressed_4) { // Botón 1 (GPIO 10)
+        reset_seq_step = 0;
+        Serial.println(F("[RESET_SEQ] Secuencia de reseteo completada (1->2->3->4->4->3->2->1 en <= 5s)"));
+        Serial.println(F("[RESET_SEQ] Formateando EEPROM y reiniciando sistema a huevo limpio..."));
+        eraseStateFromEEPROM();
+#if defined(ESP32)
+        ESP.restart();
+#else
+        tamalib_reset();
+        estadoActual = CONFIGURACION;
+        wake_up_screen();
+        displayTama();
+#endif
+        return 0;
+      } else {
+        reset_seq_step = 0;
+      }
+    }
+  }
+
+  // ------------------------------------------------------------------
   //  Manejo de Alerta/Notificación Pomodoro (Interrupción Prioritaria)
   // ------------------------------------------------------------------
   if (pomo_alert_active) {
