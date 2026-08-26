@@ -157,6 +157,7 @@ void cpu_release(void);
 
 int cpu_step(void);
 void cpu_increment_second(void);
+u32_t cpu_get_pending_seconds(void);
 
 #ifdef __cplusplus
 }

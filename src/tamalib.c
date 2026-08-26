@@ -175,3 +175,8 @@ void tamalib_increment_second(void)
 {
   cpu_increment_second();
 }
+
+u32_t tamalib_get_pending_seconds(void)
+{
+  return cpu_get_pending_seconds();
+}

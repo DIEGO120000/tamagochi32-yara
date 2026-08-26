@@ -70,6 +70,7 @@ void tamalib_register_hal(hal_t *hal);
 //void tamalib_mainloop(void);
 void tamalib_mainloop_step_by_step(void);
 void tamalib_increment_second(void);
+u32_t tamalib_get_pending_seconds(void);
 #ifdef __cplusplus
 }
 #endif

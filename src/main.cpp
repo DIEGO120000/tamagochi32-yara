@@ -1740,7 +1740,7 @@ void measure_battery() {
   uint32_t sum_raw = 0;
   for (int i = 0; i < 50; i++) {
     sum_raw += analogRead(PIN_BATTERY);
-    delay(1);
+    delayMicroseconds(50);
   }
   float raw_avg = sum_raw / 50.0;
   
@@ -2117,6 +2117,14 @@ void setup()
 void loop()
 {
   static unsigned long last_cpu_step = 0;
+  static unsigned long last_real_second = 0;
+
+  if (last_cpu_step == 0) {
+    last_cpu_step = micros();
+  }
+  if (last_real_second == 0) {
+    last_real_second = millis();
+  }
 
   // Control de inactividad para suspender la pantalla
   if (!screen_sleeping && (millis() - last_activity_time >= SLEEP_TIMEOUT_MS)) {
@@ -2137,33 +2145,33 @@ void loop()
     }
   }
 
-#if defined(ESP32)
-  // Arquitectura de Burst Emulation (Light Sleep en ráfagas)
-  // Entramos en Light Sleep solo si la pantalla está suspendida y no hay alarma de Pomodoro activa
-  if (screen_sleeping && !pomo_alert_active) {
-    // 1. Configurar botones para despertar la CPU (GPIO Interrupts)
-    gpio_wakeup_enable((gpio_num_t)PIN_BTN_L, GPIO_INTR_LOW_LEVEL);
-    gpio_wakeup_enable((gpio_num_t)PIN_BTN_M, GPIO_INTR_LOW_LEVEL);
-    gpio_wakeup_enable((gpio_num_t)PIN_BTN_R, GPIO_INTR_LOW_LEVEL);
-    gpio_wakeup_enable((gpio_num_t)PIN_BTN_4, GPIO_INTR_LOW_LEVEL);
-    gpio_wakeup_enable((gpio_num_t)PIN_BTN_RST, GPIO_INTR_LOW_LEVEL);
-    esp_sleep_enable_gpio_wakeup();
-
-    // 2. Configurar despertador por temporizador (1 segundo = 1,000,000 microsegundos)
-    esp_sleep_enable_timer_wakeup(1000000ULL);
-
-    // 3. Iniciar Light Sleep
-    esp_light_sleep_start();
-  }
-#endif
-
   // Alarma Casio del Pomodoro (no bloqueante)
   run_pomo_alarm();
 
-  static unsigned long last_real_second = 0;
-  unsigned long now = micros();
+  // Sincronización de segundos reales transcurridos -> Cola de segundos
+  unsigned long currentMillis = millis();
+  if (currentMillis - last_real_second >= 1000) {
+    unsigned long elapsed_ms = currentMillis - last_real_second;
+    unsigned long seconds_to_add = elapsed_ms / 1000;
+    
+    // Limitar segundos acumulados por seguridad (hasta 60 segundos)
+    if (seconds_to_add > 60) {
+      seconds_to_add = 60;
+    }
+    
+    for (unsigned long i = 0; i < seconds_to_add; i++) {
+      tamalib_increment_second();
+      // Temporizador de fondo Pomodoro
+      update_pomodoro_timer();
+    }
+    last_real_second += seconds_to_add * 1000;
+#ifdef ENABLE_SERIAL_DEBUG_INPUT
+    Serial.println(F("Sincronización de segundos aplicada"));
+#endif
+  }
 
   // Procesamiento acumulado (catch-up)
+  unsigned long now = micros();
   if (now - last_cpu_step >= CPU_STEP_DELAY_US) {
     unsigned long elapsed = now - last_cpu_step;
     unsigned long steps = elapsed / CPU_STEP_DELAY_US;
@@ -2179,26 +2187,33 @@ void loop()
     last_cpu_step += steps * CPU_STEP_DELAY_US;
   }
 
-  unsigned long currentMillis = millis();
-  if (currentMillis - last_real_second >= 1000) {
-    unsigned long elapsed_ms = currentMillis - last_real_second;
-    unsigned long seconds_to_add = elapsed_ms / 1000;
-    
-    // Limitar segundos acumulados por seguridad
-    if (seconds_to_add > 10) {
-      seconds_to_add = 10;
-    }
-    
-    for (unsigned long i = 0; i < seconds_to_add; i++) {
-      tamalib_increment_second();
-      // Temporizador de fondo Pomodoro
-      update_pomodoro_timer();
-    }
-    last_real_second += seconds_to_add * 1000;
-#ifdef ENABLE_SERIAL_DEBUG_INPUT
-    Serial.println(F("Sincronización de segundos aplicada"));
-#endif
+  // Asegurar ciclos de CPU intercalados (al menos 200 pasos por segundo) para que la ISR de la ROM procese cada tick pendiente
+  unsigned int drain_guard = 0;
+  while (tamalib_get_pending_seconds() > 0 && drain_guard < 5000) {
+    tamalib_mainloop_step_by_step();
+    drain_guard++;
   }
+
+#if defined(ESP32)
+  // Arquitectura de Burst Emulation (Light Sleep en ráfagas)
+  // Entramos en Light Sleep solo si la pantalla está suspendida, no hay alarma de Pomodoro activa
+  // y todos los segundos pendientes han sido procesados por la ROM
+  if (screen_sleeping && !pomo_alert_active && tamalib_get_pending_seconds() == 0) {
+    // 1. Configurar botones para despertar la CPU (GPIO Interrupts)
+    gpio_wakeup_enable((gpio_num_t)PIN_BTN_L, GPIO_INTR_LOW_LEVEL);
+    gpio_wakeup_enable((gpio_num_t)PIN_BTN_M, GPIO_INTR_LOW_LEVEL);
+    gpio_wakeup_enable((gpio_num_t)PIN_BTN_R, GPIO_INTR_LOW_LEVEL);
+    gpio_wakeup_enable((gpio_num_t)PIN_BTN_4, GPIO_INTR_LOW_LEVEL);
+    gpio_wakeup_enable((gpio_num_t)PIN_BTN_RST, GPIO_INTR_LOW_LEVEL);
+    esp_sleep_enable_gpio_wakeup();
+
+    // 2. Configurar despertador por temporizador (1 segundo = 1,000,000 microsegundos)
+    esp_sleep_enable_timer_wakeup(1000000ULL);
+
+    // 3. Iniciar Light Sleep
+    esp_light_sleep_start();
+  }
+#endif
 
 #ifdef ENABLE_AUTO_SAVE_STATUS
   // Auto-guardado periódico (cada 5 minutos de forma ininterrumpida)

@@ -183,6 +183,7 @@ static u32_t tick_counter = 0;
 static u32_t ts_freq;
 //static u8_t speed_ratio = 0;
 static timestamp_t ref_ts;
+static volatile u32_t pending_clock_seconds = 0;
 
 /*
 static state_t cpu_state = {
@@ -1845,6 +1846,8 @@ void cpu_reset(void)
 {
   u13_t i;
 
+  pending_clock_seconds = 0;
+
   /* Registers and variables init */
   pc = TO_PC(0, 1, 0x00); // PC starts at bank 0, page 1, step 0
   np = TO_NP(0, 1); // NP starts at page 1
@@ -1978,6 +1981,12 @@ int cpu_step(void)
     // generate_interrupt(INT_CLOCK_TIMER_SLOT, 3); // Deshabilitado para sincronización en tiempo real (RTC)
   }
 
+  /* Dispatch pending real-time clock interrupts (queued seconds) */
+  if (pending_clock_seconds > 0 && !interrupts[INT_CLOCK_TIMER_SLOT].triggered && I) {
+    pending_clock_seconds--;
+    generate_interrupt(INT_CLOCK_TIMER_SLOT, 3);
+  }
+
   if (prog_timer_enabled && tick_counter - prog_timer_timestamp >= TIMER_256HZ_PERIOD) {
     do {
       prog_timer_timestamp += TIMER_256HZ_PERIOD;
@@ -2009,5 +2018,10 @@ int cpu_step(void)
 
 void cpu_increment_second(void)
 {
-  generate_interrupt(INT_CLOCK_TIMER_SLOT, 3);
+  pending_clock_seconds++;
+}
+
+u32_t cpu_get_pending_seconds(void)
+{
+  return pending_clock_seconds;
 }
