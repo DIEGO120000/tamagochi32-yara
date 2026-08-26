@@ -2116,14 +2116,16 @@ void setup()
 
 void loop()
 {
-  static unsigned long last_cpu_step = 0;
-  static unsigned long last_real_second = 0;
+  static int64_t last_sync_us = 0;
+  static int64_t last_cpu_step_us = 0;
 
-  if (last_cpu_step == 0) {
-    last_cpu_step = micros();
+  int64_t now_us = esp_timer_get_time();
+
+  if (last_sync_us == 0) {
+    last_sync_us = now_us;
   }
-  if (last_real_second == 0) {
-    last_real_second = millis();
+  if (last_cpu_step_us == 0) {
+    last_cpu_step_us = now_us;
   }
 
   // Control de inactividad para suspender la pantalla
@@ -2148,56 +2150,49 @@ void loop()
   // Alarma Casio del Pomodoro (no bloqueante)
   run_pomo_alarm();
 
-  // Sincronización de segundos reales transcurridos -> Cola de segundos
-  unsigned long currentMillis = millis();
-  if (currentMillis - last_real_second >= 1000) {
-    unsigned long elapsed_ms = currentMillis - last_real_second;
-    unsigned long seconds_to_add = elapsed_ms / 1000;
-    
-    // Limitar segundos acumulados por seguridad (hasta 60 segundos)
-    if (seconds_to_add > 60) {
-      seconds_to_add = 60;
-    }
-    
-    for (unsigned long i = 0; i < seconds_to_add; i++) {
+  // ------------------------------------------------------------------
+  // Anclaje al Reloj Hardware (Wall-Clock Synchronization):
+  // delta_us = now_us - last_sync_us
+  // ------------------------------------------------------------------
+  int64_t delta_us = now_us - last_sync_us;
+  if (delta_us >= 1000000LL) {
+    uint32_t seconds_to_add = (uint32_t)(delta_us / 1000000LL);
+    for (uint32_t s = 0; s < seconds_to_add; s++) {
       tamalib_increment_second();
-      // Temporizador de fondo Pomodoro
       update_pomodoro_timer();
+      // Ciclos de CPU intercalados garantizados por cada segundo (200 pasos)
+      for (int step = 0; step < 200; step++) {
+        tamalib_mainloop_step_by_step();
+      }
     }
-    last_real_second += seconds_to_add * 1000;
+    last_sync_us += (int64_t)seconds_to_add * 1000000LL;
 #ifdef ENABLE_SERIAL_DEBUG_INPUT
-    Serial.println(F("Sincronización de segundos aplicada"));
+    Serial.println(F("Sincronización Wall-Clock de segundos aplicada"));
 #endif
   }
 
-  // Procesamiento acumulado (catch-up)
-  unsigned long now = micros();
-  if (now - last_cpu_step >= CPU_STEP_DELAY_US) {
-    unsigned long elapsed = now - last_cpu_step;
-    unsigned long steps = elapsed / CPU_STEP_DELAY_US;
-    
-    // Limitar ráfaga para evitar desbordamiento del watchdog (máx. 2 segundos = 25,000 pasos)
-    if (steps > 25000) {
-      steps = 25000;
-    }
-    
-    for (unsigned long i = 0; i < steps; i++) {
+  // ------------------------------------------------------------------
+  // Procesamiento acumulado de pasos de CPU (Catch-up continuo)
+  // ------------------------------------------------------------------
+  now_us = esp_timer_get_time();
+  if (now_us - last_cpu_step_us >= CPU_STEP_DELAY_US) {
+    int64_t elapsed_us = now_us - last_cpu_step_us;
+    uint32_t steps = (uint32_t)(elapsed_us / CPU_STEP_DELAY_US);
+    for (uint32_t i = 0; i < steps; i++) {
       tamalib_mainloop_step_by_step();
     }
-    last_cpu_step += steps * CPU_STEP_DELAY_US;
+    last_cpu_step_us += (int64_t)steps * CPU_STEP_DELAY_US;
   }
 
-  // Asegurar ciclos de CPU intercalados (al menos 200 pasos por segundo) para que la ISR de la ROM procese cada tick pendiente
-  unsigned int drain_guard = 0;
-  while (tamalib_get_pending_seconds() > 0 && drain_guard < 5000) {
+  // Drenar cualquier tick pendiente restante
+  while (tamalib_get_pending_seconds() > 0) {
     tamalib_mainloop_step_by_step();
-    drain_guard++;
   }
 
 #if defined(ESP32)
+  // ------------------------------------------------------------------
   // Arquitectura de Burst Emulation (Light Sleep en ráfagas)
-  // Entramos en Light Sleep solo si la pantalla está suspendida, no hay alarma de Pomodoro activa
-  // y todos los segundos pendientes han sido procesados por la ROM
+  // ------------------------------------------------------------------
   if (screen_sleeping && !pomo_alert_active && tamalib_get_pending_seconds() == 0) {
     // 1. Configurar botones para despertar la CPU (GPIO Interrupts)
     gpio_wakeup_enable((gpio_num_t)PIN_BTN_L, GPIO_INTR_LOW_LEVEL);
@@ -2210,8 +2205,44 @@ void loop()
     // 2. Configurar despertador por temporizador (1 segundo = 1,000,000 microsegundos)
     esp_sleep_enable_timer_wakeup(1000000ULL);
 
-    // 3. Iniciar Light Sleep
+    // 3. Almacenar la marca de tiempo exacta previa al sleep
+    int64_t pre_sleep_time = esp_timer_get_time();
+
+    // 4. Iniciar Light Sleep
     esp_light_sleep_start();
+
+    // 5. Inmediatamente al despertar, calcular duración exacta dormida
+    int64_t post_sleep_time = esp_timer_get_time();
+    int64_t sleep_duration = post_sleep_time - pre_sleep_time;
+
+    // 6. Recuperar íntegramente los segundos transcurridos de forma síncrona
+    int64_t sleep_delta_us = post_sleep_time - last_sync_us;
+    if (sleep_delta_us >= 1000000LL) {
+      uint32_t sleep_seconds = (uint32_t)(sleep_delta_us / 1000000LL);
+      for (uint32_t s = 0; s < sleep_seconds; s++) {
+        tamalib_increment_second();
+        update_pomodoro_timer();
+        for (int step = 0; step < 200; step++) {
+          tamalib_mainloop_step_by_step();
+        }
+      }
+      last_sync_us += (int64_t)sleep_seconds * 1000000LL;
+    }
+
+    // 7. Recuperar ciclos de CPU de emulación equivalentes al tiempo dormido
+    int64_t sleep_cpu_elapsed = post_sleep_time - last_cpu_step_us;
+    if (sleep_cpu_elapsed >= CPU_STEP_DELAY_US) {
+      uint32_t steps = (uint32_t)(sleep_cpu_elapsed / CPU_STEP_DELAY_US);
+      for (uint32_t i = 0; i < steps; i++) {
+        tamalib_mainloop_step_by_step();
+      }
+      last_cpu_step_us += (int64_t)steps * CPU_STEP_DELAY_US;
+    }
+
+    // Drenar cualquier tick restante antes de salir
+    while (tamalib_get_pending_seconds() > 0) {
+      tamalib_mainloop_step_by_step();
+    }
   }
 #endif
 
